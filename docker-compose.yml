@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: institution-scanner:latest
+    container_name: institution-scanner
+    volumes:
+      # Persist cache so incremental downloads work across runs
+      - ./cache:/app/cache
+      # Persist output so reports are accessible on the host
+      - ./output:/app/output
+      # Persist logs
+      - ./logs:/app/logs
+    environment:
+      - TZ=America/New_York
+    # Uncomment to run on a schedule using a simple cron approach
+    # or trigger externally (e.g. systemd timer, cron, Airflow)
+    restart: "no"
+
+  # Optional: run on a weekly schedule via ofelia
+  # Uncomment to enable automatic weekly scanning
+  # scheduler:
+  #   image: mcuadros/ofelia:latest
+  #   depends_on:
+  #     - scanner
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #   command: daemon --docker
+  #   environment:
+  #     - TZ=America/New_York
+  #   labels:
+  #     ofelia.job-run.scan.schedule: "0 8 * * 1"
+  #     ofelia.job-run.scan.container: institution-scanner
