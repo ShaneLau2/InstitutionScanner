@@ -31,19 +31,27 @@ for _d in (CACHE_DIR, OUTPUT_DIR, LOG_DIR):
 MIN_PRICE: float = 3.0        # Minimum close price (USD) — ignore penny stocks
 MAX_PRICE: float = 500.0      # Maximum close price
 MIN_VOLUME: int = 100_000     # Minimum daily volume (shares)
-MIN_MARKET_CAP: float = 100e6  # Minimum market cap (USD) — ignore nano-caps
+MIN_MARKET_CAP: float = 5e7    # Minimum market cap (USD) — ignore micro-caps
 
 # ======================================================================
 # Data Download
 # ======================================================================
 HISTORY_YEARS: int = 10                  # Years of daily data to pull
-DOWNLOAD_THREADS: int = 12               # concurrent.futures workers
-DOWNLOAD_BATCH_SIZE: int = 50            # tickers per batch
-DOWNLOAD_RATE_LIMIT_PAUSE: float = 0.05  # seconds between tickers inside a batch
-DOWNLOAD_BATCH_PAUSE: float = 1.0        # seconds between batches
-DOWNLOAD_RETRIES: int = 3                # retries on transient errors
-DOWNLOAD_TIMEOUT: int = 30               # seconds per ticker
-MAX_DOWNLOAD_ERRORS: int = 500           # abort if this many consecutive errors (harmless 404s from delisted tickers are common)
+
+# Yahoo Finance rate limits (empirically observed, not officially documented):
+#   ~1-2 req/s  per IP without TLS fingerprint evasion
+#   ~60 req/min Yahoo's unofficial guideline
+#   ~900 burst requests before hard throttling
+#   Historical data (period > 1y) is heavier — triggers limits faster
+#   TLS fingerprint: Python's 'requests' is detected as bot since 2025
+#
+# Strategy: 2 threads, 1s pause = ~2 req/s = ~120 req/min
+# Phase 2 (indicator computation) stays parallel since it's CPU-bound, no network
+DOWNLOAD_THREADS: int = 2                # 2 threads — balances speed vs Yahoo's crumb collision detection
+DOWNLOAD_RATE_LIMIT_PAUSE: float = 1.0   # seconds between requests per thread (~2 req/s total, ~120 req/min)
+DOWNLOAD_RETRIES: int = 1                # retries on transient errors (401s, 429s, timeouts) — don't waste time retrying dead URLs
+DOWNLOAD_TIMEOUT: int = 15               # seconds per ticker (lower = less accumulated delay on dead URLs)
+MAX_DOWNLOAD_ERRORS: int = 2000          # abort if this many consecutive errors (harmless 404s from delisted tickers are common)
 
 # Ticker list sources (free, no API key required)
 TICKER_SOURCES: list[str] = field(default_factory=lambda: [
@@ -146,7 +154,7 @@ TOP_N_PARQUET: int = 200
 # ======================================================================
 # Runtime
 # ======================================================================
-SCAN_THREADS: int = 8           # Threads for parallel indicator calculation
+SCAN_THREADS: int = 12          # Threads for parallel indicator calculation (numpy releases GIL)
 CHECKPOINT_INTERVAL: int = 100  # Save checkpoint every N tickers
 ENABLE_CHECKPOINT: bool = True
 

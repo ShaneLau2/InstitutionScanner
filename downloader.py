@@ -10,6 +10,7 @@ Responsible for:
 
 from __future__ import annotations
 
+import json
 import csv
 import logging
 import os
@@ -28,15 +29,14 @@ from tqdm import tqdm
 
 from config import (
     CACHE_DIR,
-    DOWNLOAD_BATCH_PAUSE,
-    DOWNLOAD_BATCH_SIZE,
     DOWNLOAD_RATE_LIMIT_PAUSE,
     DOWNLOAD_RETRIES,
     DOWNLOAD_THREADS,
     DOWNLOAD_TIMEOUT,
     HISTORY_YEARS,
-    MAX_DOWNLOAD_ERRORS,
     LOG_DIR,
+    MAX_DOWNLOAD_ERRORS,
+    MIN_MARKET_CAP,
     MIN_PRICE,
     MIN_VOLUME,
 )
@@ -107,23 +107,12 @@ _STATIC_ETFS: set[str] = {
     "XRT", "KRE", "XHB", "XME", "XOP",
 }
 
+# ---- Ticker validation (no regex — simple rules) ----
 
-_INVALID_TICKER_PATTERNS: list[str] = [
-    "=",  # delisted / test symbols like AAC=
-    "$",   # mutual funds / weird symbols
-    "^",   # indices
-    ".",   # suffixes like .A, .B, .CL
-]
-
-# NASDAQ lists contain preferred shares with suffixes like:
-#   ARR-C, ASB-F (hyphen + single capital letter)
-#   ARCLW, ARCIW, ARTW (ending in W — warrants, even without hyphen)
-# Any ticker matching these patterns should be skipped at source.
-import re
-_VIABLE_TICKER_RE = re.compile(
-    r"^[A-Z]{1,5}$"           # 1–5 capital letters, nothing else
-    r"|^[A-Z]{1,5}[.][A-Z]$"  # allow ONE dot-suffix like BRK.A, BF.B
-)
+_INVALID_SUFFIXES: set[str] = {
+    "W", "R", "P", "Z",    # warrants, rights, preferred, misc
+}
+_INVALID_CHARS: set[str] = {"=", "$", "^", ".", "+", "-"}
 
 _REJECTED_EXCHANGES: set[str] = {
     "OTC", "OTC BB", "OTCQB", "PINX", "GREY",
@@ -131,22 +120,22 @@ _REJECTED_EXCHANGES: set[str] = {
 
 
 def _is_viable_ticker(symbol: str, exchange: str = "") -> bool:
-    """Return True if the ticker symbol looks like a tradable equity/ETF.
+    """Return True if the ticker looks like a vanilla common stock / ETF.
 
-    Rejects:
-    - delisted suffixes (AAC=)
-    - preferred/warrants (ARR-C, ASB-F, ARCLW)
-    - units/rights (ABC-U, XYZ-R)
+    Rejects anything with:
+    - Special chars: = $ ^ . + -   (AAC=, ALUB+, BRK.B)
+    - Length > 5                       (ESLAW, FACWW, FBYDP — warrants/SPACs)
+    - Trailing W/R/P/Z                 (warrants, rights, preferred)
+      *unless* the whole symbol is ≤3 chars (e.g. CAT — legit names)
     - OTC / Pink Sheets exchanges
-    - mutual funds / indices (^, $, .)
-    - symbols longer than 5 chars (warrants, SPAC units)
     """
-    if not symbol:
+    if not symbol or len(symbol) > 5:
         return False
-    # Regex: plain 1–5 uppercase, or 1–5 uppercase + one dot-suffix letter
-    if not _VIABLE_TICKER_RE.match(symbol):
+    for ch in symbol:
+        if ch in _INVALID_CHARS:
+            return False
+    if len(symbol) >= 4 and symbol[-1].upper() in _INVALID_SUFFIXES:
         return False
-    # Reject non-viable exchanges
     if exchange and exchange.upper() in _REJECTED_EXCHANGES:
         return False
     return True
@@ -169,17 +158,17 @@ def _fetch_nasdaq_traded() -> list[TickerInfo]:
         )
         skipped = 0
         for row in reader:
-            symbol = row.get("NASDAQ Symbol", "").strip()
+            symbol = (row.get("NASDAQ Symbol") or "").strip()
             if not symbol or symbol == "File Creation Time":
                 continue
             # Skip test issues
             if row.get("Test Issue", "N") == "Y":
                 continue
-            exchange = row.get("Listing Exchange", "").strip()
+            exchange = (row.get("Listing Exchange") or "").strip()
             if not _is_viable_ticker(symbol, exchange):
                 skipped += 1
                 continue
-            name = row.get("Security Name", "").strip()
+            name = (row.get("Security Name") or "").strip()
             is_etf = row.get("ETF", "N") == "Y"
             tickers.append(TickerInfo(
                 ticker=symbol,
@@ -347,6 +336,69 @@ def _save_cache(ticker: str, df: pd.DataFrame) -> None:
     df.to_csv(path)
 
 
+# ---------------------------------------------------------------------------
+# Metadata cache (market cap, etc.)
+# ---------------------------------------------------------------------------
+
+def _meta_path(ticker: str) -> Path:
+    """File path for a ticker's cached metadata JSON."""
+    safe = ticker.replace("/", "_").replace("\\", "_")
+    return CACHE_DIR / f"{safe}.json"
+
+
+def _save_meta(ticker: str, data: dict) -> None:
+    """Persist metadata (marketCap, etc.) to JSON."""
+    _meta_path(ticker).write_text(json.dumps(data, default=str))
+
+
+def _load_meta(ticker: str) -> dict | None:
+    """Load cached metadata, or None."""
+    path = _meta_path(ticker)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _fetch_market_cap_from_yf(ticker: str) -> float | None:
+    """
+    Fetch market cap from yfinance Ticker.info for a single ticker.
+
+    Returns a float in USD or None on failure.
+    """
+    try:
+        tkr = yf.Ticker(ticker)
+        info = tkr.info
+        mc = info.get("marketCap")
+        if mc is not None and isinstance(mc, (int, float)) and mc > 0:
+            return float(mc)
+        return None
+    except Exception:
+        return None
+
+
+def get_market_cap(ticker: str) -> float | None:
+    """
+    Return the cached market cap for *ticker*.
+
+    If no cached metadata exists, attempts a live fetch from yfinance,
+    caches the result, and returns it.  Returns None when unavailable.
+    """
+    meta = _load_meta(ticker)
+    if meta and "marketCap" in meta:
+        return float(meta["marketCap"])
+
+    # Try live fetch
+    mc = _fetch_market_cap_from_yf(ticker)
+    if mc is not None:
+        _save_meta(ticker, {"marketCap": mc, "fetchedAt": datetime.now().isoformat()})
+        return mc
+
+    return None
+
+
 def _download_single(ticker: str) -> pd.DataFrame | None:
     """
     Download full history for *ticker* from yfinance.
@@ -355,12 +407,7 @@ def _download_single(ticker: str) -> pd.DataFrame | None:
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
             tkr = yf.Ticker(ticker)
-            # Quick liveness check — yfinance raises on delisted symbols
-            info = tkr.info
-            if info is None or (isinstance(info, dict) and info.get("regularMarketPrice") is None and info.get("previousClose") is None and len(info) <= 2):
-                # Likely delisted / no data
-                return None
-            # Request the full period and let yfinance handle the range
+            # Request the full period directly — skip info() to avoid extra HTTP calls
             end_date = datetime.now()
             start_date = end_date - timedelta(days=HISTORY_YEARS * 365 + 30)
             df = tkr.history(
@@ -388,13 +435,22 @@ def _download_single(ticker: str) -> pd.DataFrame | None:
                 return None
             return df
         except Exception as exc:
-            # 404 / delisted — not worth logging, just skip
             msg = str(exc).lower()
-            if "404" in msg or "not found" in msg or "delisted" in msg or "no timezone" in msg:
+            # 404 / delisted / timeout / curl errors — skip instantly
+            if any(kw in msg for kw in ("404", "not found", "delisted", "no timezone", "timeout", "timed out", "no data found", "failed to perform", "curl")):
                 return None
+            # 401 / 429 rate limits — back off harder
+            if "401" in msg or "429" in msg or "rate limit" in msg:
+                delay = 5 + (attempt * 5)
+                logger.debug(
+                    "Rate-limited on %s (attempt %d/%d), backing off %ds...",
+                    ticker, attempt, DOWNLOAD_RETRIES, delay,
+                )
+                time.sleep(delay)
+                continue
             logger.debug("Attempt %d/%d failed for %s: %s", attempt, DOWNLOAD_RETRIES, ticker, exc)
             if attempt < DOWNLOAD_RETRIES:
-                time.sleep(2 ** attempt)  # exponential back-off
+                time.sleep(2 ** attempt)
     return None
 
 
@@ -420,17 +476,26 @@ def download_ticker(ticker: str, force: bool = False) -> pd.DataFrame | None:
 
     # Incremental update: download only from the last cached date
     last_date = cached.index.max()
+    today = datetime.now()
+
+    # Normalise to naive datetime for comparison (Yahoo data may be tz-aware)
     if isinstance(last_date, pd.Timestamp):
         last_date = last_date.to_pydatetime()
-    today = datetime.now()
+    if last_date.tzinfo is not None:
+        last_date = last_date.replace(tzinfo=None)
+
+    # Guard: if last_date is somehow in the future, skip update
     if (today - last_date).days <= 1:
         return cached  # already up-to-date
 
     try:
         tkr = yf.Ticker(ticker)
+        # Use date strings to avoid tz mismatch inside yfinance
+        start_str = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        end_str = today.strftime("%Y-%m-%d")
         new_df = tkr.history(
-            start=(last_date + timedelta(days=1)).strftime("%Y-%m-%d"),
-            end=today.strftime("%Y-%m-%d"),
+            start=start_str,
+            end=end_str,
             interval="1d",
             auto_adjust=True,
             timeout=DOWNLOAD_TIMEOUT,
@@ -442,6 +507,9 @@ def download_ticker(ticker: str, force: bool = False) -> pd.DataFrame | None:
             })
             new_df = new_df[["Open", "High", "Low", "Close", "Volume"]]
             new_df = new_df.dropna(subset=["Close"])
+            # Strip timezone from new data to match cached
+            if new_df.index.tz is not None:
+                new_df.index = new_df.index.tz_localize(None)
             if not new_df.empty:
                 combined = pd.concat([cached, new_df])
                 combined = combined[~combined.index.duplicated(keep="last")]
@@ -479,31 +547,41 @@ def download_batch(
     total = len(symbols)
     skipped_delisted = 0
 
-    # Submit all tickers at once — ThreadPoolExecutor(max_workers=12) handles
-    # the concurrency cap.  No batch boundaries = no idle gaps.
-    with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as pool:
-        futures: dict[Any, str] = {
-            pool.submit(download_ticker, sym, force): sym for sym in symbols
-        }
-
-        for future in tqdm(
-            as_completed(futures),
-            total=total,
-            desc=desc,
-            unit="ticker",
-        ):
-            sym = futures[future]
+    # Single-threaded download with inter-request pause (respects Yahoo's
+    # ~60 req/min soft limit).  Parallel path kept for DOWNLOAD_THREADS > 1.
+    if DOWNLOAD_THREADS <= 1:
+        for sym in tqdm(symbols, desc=desc, unit="ticker"):
             try:
-                df = future.result(timeout=DOWNLOAD_TIMEOUT + 10)
+                df = download_ticker(sym, force=force)
                 if df is not None and not df.empty:
                     results[sym] = df
                 else:
-                    # None / empty → delisted or no data; harmless
                     skipped_delisted += 1
-            except Exception as exc:
-                # yfinance throws on 429s, timeouts, DNS — don't abort
-                logger.debug("Download exception for %s: %s", sym, exc)
+            except Exception:
                 skipped_delisted += 1
+            time.sleep(DOWNLOAD_RATE_LIMIT_PAUSE)
+    else:
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as pool:
+            futures: dict[Any, str] = {
+                pool.submit(download_ticker, sym, force): sym for sym in symbols
+            }
+
+            for future in tqdm(
+                as_completed(futures),
+                total=total,
+                desc=desc,
+                unit="ticker",
+            ):
+                sym = futures[future]
+                try:
+                    df = future.result(timeout=DOWNLOAD_TIMEOUT + 10)
+                    if df is not None and not df.empty:
+                        results[sym] = df
+                    else:
+                        skipped_delisted += 1
+                except Exception as exc:
+                    logger.debug("Download exception for %s: %s", sym, exc)
+                    skipped_delisted += 1
 
     logger.info(
         "Download batch complete: %d/%d tickers succeeded, %d delisted/no-data skipped.",

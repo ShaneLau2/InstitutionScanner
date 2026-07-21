@@ -2,9 +2,10 @@
 report.py — Output generation: CSV, Parquet, and terminal reports.
 
 Produces:
-  - Top50.csv:  the 50 highest-scoring tickers with key metrics.
-  - Top200.parquet:  the top 200 in Parquet format for downstream analysis.
-  - Terminal report:  human-readable ranked list with reasons.
+  - Top50.csv:          the 50 highest-scoring tickers with key metrics.
+  - AllResults.csv:     every scored ticker, sorted by score.
+  - Top200.parquet:     the top 200 in Parquet format.
+  - AllResults.parquet: every scored ticker in Parquet format.
 """
 
 from __future__ import annotations
@@ -78,7 +79,7 @@ def _results_to_dataframe(results: list[ScanResult]) -> pd.DataFrame:
 
 def export_top_csv(results: list[ScanResult], n: int = TOP_N_REPORT) -> Path:
     """
-    Export the top *n* tickers to Top50.csv.
+    Export the top *n* tickers to TopN.csv.
 
     Returns the path to the generated file.
     """
@@ -88,6 +89,15 @@ def export_top_csv(results: list[ScanResult], n: int = TOP_N_REPORT) -> Path:
     path = OUTPUT_DIR / f"Top{n}.csv"
     top.to_csv(path, index=False)
     logger.info("Exported Top %d to %s", n, path)
+    return path
+
+
+def export_full_csv(results: list[ScanResult]) -> Path:
+    """Export ALL scored tickers to AllResults.csv."""
+    df = _results_to_dataframe(results)
+    path = OUTPUT_DIR / "AllResults.csv"
+    df.to_csv(path, index=False)
+    logger.info("Exported all %d results to %s", len(df), path)
     return path
 
 
@@ -119,11 +129,23 @@ def export_all(
     results: list[ScanResult],
     top_n_csv: int = TOP_N_REPORT,
     top_n_parquet: int = TOP_N_PARQUET,
-) -> tuple[Path, Path]:
-    """Export both CSV and Parquet. Returns (csv_path, parquet_path)."""
+) -> tuple[Path, Path, Path, Path]:
+    """Export CSV, Parquet, and full results. Returns (csv_path, parquet_path, full_csv, full_parquet)."""
     csv_path = export_top_csv(results, n=top_n_csv)
     parquet_path = export_top_parquet(results, n=top_n_parquet)
-    return csv_path, parquet_path
+    full_csv = export_full_csv(results)
+    full_parquet_path = export_full_parquet(results)
+    return csv_path, parquet_path, full_csv, full_parquet_path
+
+
+def export_full_parquet(results: list[ScanResult]) -> Path:
+    """Export ALL scored tickers to AllResults.parquet."""
+    df = _results_to_dataframe(results)
+    path = OUTPUT_DIR / "AllResults.parquet"
+    table = pa.Table.from_pandas(df)
+    pq.write_table(table, path)
+    logger.info("Exported all %d results to %s", len(df), path)
+    return path
 
 
 # ======================================================================

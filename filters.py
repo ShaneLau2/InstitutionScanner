@@ -27,6 +27,7 @@ from config import (
     CMF_THRESHOLD,
     CONSOLIDATION_DAYS,
     CONSOLIDATION_MAX_RANGE_PCT,
+    MIN_MARKET_CAP,
     MIN_PRICE,
     MIN_VOLUME,
     OBV_DIVERGENCE_LOOKBACK,
@@ -426,6 +427,29 @@ def filter_volatility_contraction(df: pd.DataFrame) -> FilterResult:
 
 
 # ======================================================================
+# Market Cap Filter
+# ======================================================================
+
+def filter_min_market_cap(market_cap: float | None) -> FilterResult:
+    """Reject if market cap is below MIN_MARKET_CAP."""
+    if market_cap is None:
+        return FilterResult(
+            passed=False,
+            reason="Market cap data unavailable",
+            details={"market_cap": None},
+        )
+    passed = market_cap >= MIN_MARKET_CAP
+    return FilterResult(
+        passed=passed,
+        reason=(
+            f"MarketCap ${market_cap:,.0f} "
+            f"{'>=' if passed else '<'} MIN_MARKET_CAP ${MIN_MARKET_CAP:,.0f}"
+        ),
+        details={"market_cap": market_cap},
+    )
+
+
+# ======================================================================
 # Master filter runner
 # ======================================================================
 
@@ -434,6 +458,7 @@ class AllFilterResults:
     """Aggregated results from all filters."""
     min_price: FilterResult = field(default_factory=lambda: FilterResult(False, ""))
     min_volume: FilterResult = field(default_factory=lambda: FilterResult(False, ""))
+    min_market_cap: FilterResult = field(default_factory=lambda: FilterResult(False, ""))
     sufficient_history: FilterResult = field(default_factory=lambda: FilterResult(False, ""))
     bear_market: FilterResult = field(default_factory=lambda: FilterResult(False, ""))
     consolidation: FilterResult = field(default_factory=lambda: FilterResult(False, ""))
@@ -446,7 +471,7 @@ class AllFilterResults:
     def all_passed(self) -> bool:
         """Return True if all filters passed."""
         filters = [
-            self.min_price, self.min_volume, self.sufficient_history,
+            self.min_price, self.min_volume, self.min_market_cap, self.sufficient_history,
             self.bear_market, self.consolidation, self.volume_accumulation,
             self.obv_divergence, self.cmf_positive, self.ad_slope,
             self.volatility_contraction,
@@ -456,7 +481,7 @@ class AllFilterResults:
     def passed_count(self) -> int:
         """How many filters passed."""
         filters = [
-            self.min_price, self.min_volume, self.sufficient_history,
+            self.min_price, self.min_volume, self.min_market_cap, self.sufficient_history,
             self.bear_market, self.consolidation, self.volume_accumulation,
             self.obv_divergence, self.cmf_positive, self.ad_slope,
             self.volatility_contraction,
@@ -464,7 +489,7 @@ class AllFilterResults:
         return sum(1 for f in filters if f.passed)
 
 
-def run_all_filters(df: pd.DataFrame) -> AllFilterResults:
+def run_all_filters(df: pd.DataFrame, market_cap: float | None = None) -> AllFilterResults:
     """
     Run every filter against *df*.
 
@@ -473,6 +498,7 @@ def run_all_filters(df: pd.DataFrame) -> AllFilterResults:
     return AllFilterResults(
         min_price=filter_min_price(df),
         min_volume=filter_min_volume(df),
+        min_market_cap=filter_min_market_cap(market_cap),
         sufficient_history=filter_sufficient_history(df),
         bear_market=filter_bear_market(df),
         consolidation=filter_consolidation(df),

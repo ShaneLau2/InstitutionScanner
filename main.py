@@ -124,7 +124,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     )
 
     # Export results
-    csv_path, parquet_path = export_all(
+    csv_path, parquet_path, full_csv, full_parquet = export_all(
         report.results,
         top_n_csv=args.top,
         top_n_parquet=args.top_parquet,
@@ -134,8 +134,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print_terminal_report(report.results, n=args.top)
     print_scan_summary(report)
 
-    logger.info("CSV:  %s", csv_path)
-    logger.info("Parquet: %s", parquet_path)
+    logger.info("Top CSV:    %s", csv_path)
+    logger.info("Top PQ:     %s", parquet_path)
+    logger.info("All CSV:    %s", full_csv)
+    logger.info("All PQ:     %s", full_parquet)
 
     return 0
 
@@ -160,11 +162,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     logger.info("Re-scanning %d cached tickers...", len(all_tickers))
     results = run_parallel_indicator_scan(all_tickers)
 
-    csv_path, parquet_path = export_all(results, top_n_csv=args.top, top_n_parquet=args.top_parquet)
+    csv_path, parquet_path, full_csv, full_parquet = export_all(results, top_n_csv=args.top, top_n_parquet=args.top_parquet)
     print_terminal_report(results, n=args.top)
 
-    logger.info("CSV:  %s", csv_path)
-    logger.info("Parquet: %s", parquet_path)
+    logger.info("Top CSV:    %s", csv_path)
+    logger.info("Top PQ:     %s", parquet_path)
+    logger.info("All CSV:    %s", full_csv)
+    logger.info("All PQ:     %s", full_parquet)
 
     return 0
 

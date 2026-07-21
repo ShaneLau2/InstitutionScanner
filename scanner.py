@@ -34,6 +34,7 @@ from config import (
     DOWNLOAD_THREADS,
     ENABLE_CHECKPOINT,
     LOG_DIR,
+    MIN_MARKET_CAP,
     OUTPUT_DIR,
     SCAN_THREADS,
     TOP_N_PARQUET,
@@ -45,6 +46,7 @@ from downloader import (
     download_batch,
     download_ticker,
     get_etf_fund_flows,
+    get_market_cap,
 )
 from indicators import compute_all_indicators
 from filters import run_all_filters
@@ -150,17 +152,30 @@ def scan_single_from_df(
                 error="Insufficient data",
             )
 
+        # Pre-filter: skip tickers below the minimum market cap
+        market_cap = get_market_cap(ticker)
+        if market_cap is not None and market_cap < MIN_MARKET_CAP:
+            return ScanResult(
+                ticker=ticker,
+                name=ticker_info.name,
+                sector=ticker_info.sector,
+                industry=ticker_info.industry,
+                is_etf=ticker_info.is_etf,
+                error=f"Market cap ${market_cap:,.0f} below minimum ${MIN_MARKET_CAP:,.0f}",
+            )
+
         close = df["Close"].iloc[-1]
 
         # ---- 2. Indicators ----
         df = compute_all_indicators(df)
 
         # ---- 3. Filters ----
-        filter_results = run_all_filters(df)
+        filter_results = run_all_filters(df, market_cap=market_cap)
         passed = filter_results.all_passed()
         filter_map = {
             "min_price": filter_results.min_price.passed,
             "min_volume": filter_results.min_volume.passed,
+            "min_market_cap": filter_results.min_market_cap.passed,
             "bear_market": filter_results.bear_market.passed,
             "consolidation": filter_results.consolidation.passed,
             "volume_accumulation": filter_results.volume_accumulation.passed,
@@ -327,7 +342,8 @@ def run_scan(
     for ti in all_tickers:
         if ti.ticker in processed_set:
             continue
-        path = CACHE_DIR / f"{ti.ticker.replace('/', '_').replace('\\\\', '_')}.csv"
+        safe = ti.ticker.replace("/", "_").replace("\\", "_")
+        path = CACHE_DIR / f"{safe}.csv"
         if path.exists():
             analyse_queue.append(ti)
         else:
@@ -341,6 +357,7 @@ def run_scan(
     )
 
     results: list[ScanResult] = []
+    analysed_this_run: set[str] = set()
     successful: int = 0
     failed: int = 0
     passed: int = 0
@@ -412,6 +429,7 @@ def run_scan(
                     passed += 1
 
             processed_set.add(ti.ticker)
+            analysed_this_run.add(ti.ticker)
 
             # Checkpoint every N tickers
             if len(processed_set) % CHECKPOINT_INTERVAL == 0:
@@ -419,8 +437,11 @@ def run_scan(
 
     # Merge previous results for tickers we didn't re-analyse
     for ticker, sr in prev_results.items():
-        if ticker not in processed_set:
+        if ticker not in analysed_this_run:
             results.append(sr)
+            successful += 1
+            if sr.passed_filters:
+                passed += 1
 
     # Final checkpoint
     save_checkpoint(processed_set)
@@ -433,7 +454,7 @@ def run_scan(
     report = ScanReport(
         results=results,
         total_tickers=len(all_tickers),
-        successful=successful + len(prev_results),
+        successful=successful,
         failed=failed,
         passed_filters=passed,
         elapsed_seconds=elapsed,

@@ -36,5 +36,5 @@ RUN mkdir -p /app/cache /app/output /app/logs && \
 
 USER scanner
 
-# Default command: run the full scan
-CMD ["python", "main.py", "scan"]
+# Default: drop into interactive terminal — user decides what to run
+CMD ["/bin/bash"]

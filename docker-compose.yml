@@ -1,10 +1,9 @@
-version: "3.9"
-
 services:
   scanner:
     build:
       context: .
       dockerfile: Dockerfile
+    command: tail -f /dev/null
     image: institution-scanner:latest
     container_name: institution-scanner
     volumes:
@@ -19,18 +18,3 @@ services:
     # Uncomment to run on a schedule using a simple cron approach
     # or trigger externally (e.g. systemd timer, cron, Airflow)
     restart: "no"
-
-  # Optional: run on a weekly schedule via ofelia
-  # Uncomment to enable automatic weekly scanning
-  # scheduler:
-  #   image: mcuadros/ofelia:latest
-  #   depends_on:
-  #     - scanner
-  #   volumes:
-  #     - /var/run/docker.sock:/var/run/docker.sock:ro
-  #   command: daemon --docker
-  #   environment:
-  #     - TZ=America/New_York
-  #   labels:
-  #     ofelia.job-run.scan.schedule: "0 8 * * 1"
-  #     ofelia.job-run.scan.container: institution-scanner
