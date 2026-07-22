@@ -16,7 +16,7 @@ MAIN_FILE = PROJECT_ROOT / "main.py"
 from report import market_output_filename, resolve_latest_file
 
 COLUMN_NAMES = {
-    "Ticker": "代码", "Name": "名称", "Sector": "板块", "Industry": "行业", "IsETF": "ETF", "Style": "风格", "Quality": "质量",
+    "Ticker": "代码", "Name": "名称", "MarketCap": "市值", "Turnover": "成交额", "Sector": "板块", "Industry": "行业", "IsETF": "ETF", "Style": "风格", "Quality": "质量",
     "Close": "收盘价", "Score": "综合评分", "TrendScore": "趋势分", "VolumeScore": "成交量分",
     "AccumulationScore": "吸筹分", "CompressionScore": "波动分", "StructureScore": "结构分",
     "OBV": "OBV", "CMF": "CMF", "AD": "A/D", "ATR14": "ATR14", "RSI14": "RSI14",

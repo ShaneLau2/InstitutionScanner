@@ -79,6 +79,8 @@ class ScanResult:
     industry: str = ""
     is_etf: bool = False
     asset_type: str = "stock"
+    market_cap_val: float | None = None
+    turnover: float = 0.0
     close: float = 0.0
     score: ScoreBreakdown = field(default_factory=ScoreBreakdown)
     obv: float = np.nan
@@ -231,6 +233,7 @@ def scan_single_from_df(
             )
 
         close = df["Close"].iloc[-1]
+        turnover_val = float(close * df["Volume"].iloc[-1])
 
         # ---- 2. Indicators ----
         # Truncate to MAX_INDICATOR_BARS — all indicators use ≤252 bars
@@ -298,6 +301,8 @@ def scan_single_from_df(
             passed_filters=passed,
             filter_details=filter_map,
             style=style,
+            market_cap_val=market_cap,
+            turnover=turnover_val,
         )
 
     except Exception as exc:

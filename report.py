@@ -98,6 +98,8 @@ def _results_to_dataframe(results: list[ScanResult]) -> pd.DataFrame:
         rows.append({
             "Ticker": r.ticker,
             "Name": r.name,
+            "MarketCap": r.market_cap_val,
+            "Turnover": round(r.turnover, 2) if r.turnover else 0.0,
             "Market": r.market,
             "Sector": r.sector,
             "Industry": r.industry,
