@@ -208,16 +208,25 @@ class ScannerGUI:
         market = self.market.get()
         self.market_label.config(text=labels[market])
         self.status.set(f"已切换市场：{labels[market]}")
-        is_us_only = market == "us"
-        self.source_box.config(state="disabled" if is_us_only else "readonly")
-        if is_us_only:
+        if market == "us":
             self._prev_scope = self.scope.get()
-            self.data_source_label.set("当前：Yahoo Finance")
+            self._prev_ds_values = self.source_box["values"]
+            self.source_box["values"] = ("Yahoo Finance",)
+            self.data_source.set("Yahoo Finance")
+            self.source_box.config(state="readonly")
+            self.data_source_label.set("美股仅支持 Yahoo Finance")
             self.scope.set("仅股票")
         else:
-            self.data_source_label.set("当前：东方财富")
+            self.source_box["values"] = getattr(self, "_prev_ds_values", ("eastmoney", "sina", "tencent"))
+            self.source_box.config(state="readonly")
+            if self.data_source.get() == "Yahoo Finance":
+                self.data_source.set("eastmoney")
+            self.data_source_label.set(f"当前：{self._ds_label(self.data_source.get())}")
             if hasattr(self, "_prev_scope"):
                 self.scope.set(self._prev_scope)
+
+    def _ds_label(self, source: str) -> str:
+        return {"eastmoney": "东方财富", "sina": "新浪", "tencent": "腾讯", "Yahoo Finance": "Yahoo Finance"}.get(source, source)
 
     def _data_source_changed(self, _event=None) -> None:
         labels = {"eastmoney": "东方财富", "sina": "新浪", "tencent": "腾讯"}
