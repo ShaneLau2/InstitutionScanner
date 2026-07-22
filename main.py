@@ -62,7 +62,7 @@ from report import (
 
 def setup_logging(verbose: bool = False) -> None:
     """Configure root logger with console and file handlers."""
-    root = logging.getLogger("institution_scanner")
+    root = logging.getLogger("scanner_gui")
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
 
     # Remove old handlers to avoid duplicate output
@@ -97,23 +97,46 @@ def setup_logging(verbose: bool = False) -> None:
 
 def cmd_scan(args: argparse.Namespace) -> int:
     """Run the full accumulation scan."""
-    logger = logging.getLogger("institution_scanner")
+    logger = logging.getLogger("scanner_gui")
 
     include_stocks = not args.etfs_only
     include_etfs = not args.stocks_only
 
+    # Determine which markets to scan
+    include_a_shares = not args.us_only
+    include_us = args.us_only or args.include_us
+    if args.a_shares_only:
+        include_us = False
+        include_stocks = True
+        include_etfs = True
+
     # Build universe or use specific tickers
     if args.tickers:
         symbols = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
-        stock_universe = [TickerInfo(ticker=s) for s in symbols]
+        # Detect market by suffix
+        stock_universe: list[TickerInfo] = []
         etf_universe: list[TickerInfo] = []
+        for s in symbols:
+            mkt = "us" if not any(s.endswith(suffix) for suffix in (".SH", ".SZ", ".BJ")) else "a_share"
+            ti = TickerInfo(ticker=s, market=mkt)
+            stock_universe.append(ti)
         logger.info("Scanning %d specified tickers: %s", len(symbols), ", ".join(symbols))
     else:
-        logger.info("Building ticker universe (stocks=%s, ETFs=%s)...", include_stocks, include_etfs)
-        stock_universe, etf_universe = build_ticker_universe(
-            include_stocks=include_stocks,
-            include_etfs=include_etfs,
-        )
+        if not include_a_shares and include_us:
+            logger.info("Building US stock universe only...")
+            stock_universe, etf_universe = build_ticker_universe(
+                include_stocks=False, include_etfs=False, include_us=True,
+            )
+        elif include_stocks or include_etfs:
+            logger.info("Building ticker universe (stocks=%s, ETFs=%s, US=%s)...",
+                        include_stocks, include_etfs, include_us)
+            stock_universe, etf_universe = build_ticker_universe(
+                include_stocks=include_stocks,
+                include_etfs=include_etfs,
+                include_us=include_us,
+            )
+        else:
+            stock_universe, etf_universe = [], []
         logger.info(
             "Universe: %d stocks, %d ETFs — %d total.",
             len(stock_universe), len(etf_universe),
@@ -127,6 +150,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         force_download=args.force_download,
         resume=not args.no_resume,
         data_source=args.data_source,
+        include_us=include_us,
     )
 
     if report.successful == 0:
@@ -158,7 +182,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     Re-generate reports from already-cached data.
     Useful for re-scoring without re-downloading.
     """
-    logger = logging.getLogger("institution_scanner")
+    logger = logging.getLogger("scanner_gui")
 
     include_stocks = not args.etfs_only
     include_etfs = not args.stocks_only
@@ -186,7 +210,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_download(args: argparse.Namespace) -> int:
     """Download data only — no scan, no report."""
-    logger = logging.getLogger("institution_scanner")
+    logger = logging.getLogger("scanner_gui")
 
     include_stocks = not args.etfs_only
     include_etfs = not args.stocks_only
@@ -198,6 +222,7 @@ def cmd_download(args: argparse.Namespace) -> int:
         stock_universe, etf_universe = build_ticker_universe(
             include_stocks=include_stocks,
             include_etfs=include_etfs,
+            include_us=getattr(args, "include_us", False),
         )
         all_tickers = list(stock_universe) + list(etf_universe)
 
@@ -210,7 +235,7 @@ def cmd_download(args: argparse.Namespace) -> int:
 
 def cmd_clean(args: argparse.Namespace) -> int:
     """Remove all cached data and checkpoints."""
-    logger = logging.getLogger("institution_scanner")
+    logger = logging.getLogger("scanner_gui")
     import shutil
 
     if args.cache_only:
@@ -238,7 +263,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
-        prog="InstitutionScanner",
+        prog="ScannerGui",
         description="Institutional Accumulation Scanner — find A-share stocks & ETFs "
                     "being quietly accumulated by institutions during bear markets.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -248,6 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ---- scan ----
     scan_p = sub.add_parser("scan", help="Run the full accumulation scan")
+    scan_p.add_argument("--a-shares-only", action="store_true", help="Scan only A-shares (default includes both)")
+    scan_p.add_argument("--us-only", action="store_true", help="Scan only US stocks and ETFs")
+    scan_p.add_argument("--include-us", action="store_true", help="Include US stocks alongside A-shares")
     scan_p.add_argument("--stocks-only", action="store_true", help="Scan only stocks")
     scan_p.add_argument("--etfs-only", action="store_true", help="Scan only ETFs")
     scan_p.add_argument("--force-download", action="store_true",
@@ -256,7 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Do not resume from checkpoint — start fresh")
     scan_p.add_argument("--cache-first", action="store_true",
                         help="Prefer cached data and skip re-downloading unchanged tickers")
-    scan_p.add_argument("--data-source", choices=("eastmoney", "sina", "tencent"), default="eastmoney", help="历史行情数据源")
+    scan_p.add_argument("--data-source", choices=("eastmoney", "sina", "tencent"), default="eastmoney", help="A股行情数据源（美股自动使用yfinance）")
     scan_p.add_argument("--top", type=int, default=TOP_N_REPORT,
                         help=f"Number of tickers in the terminal report (default: {TOP_N_REPORT})")
     scan_p.add_argument("--top-parquet", type=int, default=TOP_N_PARQUET,
@@ -321,7 +349,7 @@ def main() -> int:
         print("\nInterrupted by user.", file=sys.stderr)
         return 130
     except Exception as exc:
-        logging.getLogger("institution_scanner").exception("Fatal error: %s", exc)
+        logging.getLogger("scanner_gui").exception("Fatal error: %s", exc)
         return 1
 
 

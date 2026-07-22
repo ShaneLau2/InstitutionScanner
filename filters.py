@@ -36,7 +36,7 @@ from config import (
     VOLUME_ACCUM_RATIO,
 )
 
-logger = logging.getLogger("institution_scanner.filters")
+logger = logging.getLogger("scanner_gui.filters")
 
 
 # ---------------------------------------------------------------------------

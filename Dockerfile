@@ -1,10 +1,10 @@
-# InstitutionScanner Docker Image
-# Build:  docker build -t institution-scanner .
+# ScannerGui Docker Image
+# Build:  docker build -t scanner-gui .
 # Run:    docker compose up
 
 FROM python:3.12-slim-bookworm
 
-LABEL maintainer="institution-scanner"
+LABEL maintainer="scanner-gui"
 LABEL description="Institutional Accumulation Scanner — detect stocks/ETFs with bear-market accumulation signals"
 
 # Avoid buffering stdout

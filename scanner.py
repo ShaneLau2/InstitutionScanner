@@ -29,15 +29,18 @@ import pandas as pd
 from tqdm import tqdm
 
 from config import (
+    A_SHARE_CONFIG,
     CACHE_DIR,
     CHECKPOINT_INTERVAL,
     DOWNLOAD_THREADS,
     ENABLE_CHECKPOINT,
     LOG_DIR,
+    MARKET_CONFIGS,
     MIN_MARKET_CAP,
     OUTPUT_DIR,
     SCAN_THREADS,
     TOP_N_PARQUET,
+    US_STOCK_CONFIG,
 )
 from downloader import (
     TickerInfo,
@@ -52,7 +55,7 @@ from indicators import compute_all_indicators
 from filters import run_all_filters
 from score import score_ticker, ScoreBreakdown, classify_style
 
-logger = logging.getLogger("institution_scanner.scanner")
+logger = logging.getLogger("scanner_gui.scanner")
 logger.setLevel(logging.DEBUG)
 
 _fh = logging.FileHandler(LOG_DIR / "scanner.log", mode="a")
@@ -69,6 +72,7 @@ logger.addHandler(_fh)
 class ScanResult:
     """Full result for one scanned ticker."""
     ticker: str
+    market: str = "a_share"
     name: str = ""
     sector: str = ""
     industry: str = ""
@@ -159,10 +163,12 @@ def scan_single_from_df(
     ticker = _normalize_ticker(ticker_info.ticker)
     ticker_info.ticker = ticker
 
+    market = ticker_info.market
     try:
         if df is None or df.empty or len(df) < 20:
             return ScanResult(
                 ticker=ticker,
+                market=market,
                 name=ticker_info.name,
                 sector=ticker_info.sector,
                 industry=ticker_info.industry,
@@ -286,7 +292,8 @@ def scan_single(
     ticker = _normalize_ticker(ticker_info.ticker)
     ticker_info.ticker = ticker
     try:
-        df = download_ticker(ticker, force=force_download, source=data_source)
+        df = download_ticker(ticker, force=force_download, source=data_source,
+                             market=ticker_info.market)
         return scan_single_from_df(ticker_info, df)
     except Exception as exc:
         logger.debug("Error scanning %s: %s", ticker, exc)
@@ -320,6 +327,7 @@ def run_scan(
     force_download: bool = False,
     resume: bool = True,
     data_source: str = "eastmoney",
+    include_us: bool = False,
 ) -> ScanReport:
     """
     Two-phase parallel scan across the entire ticker universe.
@@ -350,6 +358,7 @@ def run_scan(
         stock_universe, etf_universe = build_ticker_universe(
             include_stocks=True,
             include_etfs=True,
+            include_us=include_us,
         )
 
     all_tickers: list[TickerInfo] = []
@@ -391,8 +400,12 @@ def run_scan(
         if ti.ticker in processed_set:
             continue
         safe = ti.ticker.replace("/", "_").replace("\\", "_")
-        path = CACHE_DIR / f"{safe}.csv"
-        if path.exists():
+        # Match download_ticker's cache naming: {ticker}__us or {ticker}__eastmoney
+        paths_to_try = [
+            CACHE_DIR / f"{safe}__us.csv" if ti.market == "us" else CACHE_DIR / f"{safe}__eastmoney.csv",
+            CACHE_DIR / f"{safe}.csv",
+        ]
+        if any(p.exists() for p in paths_to_try):
             analyse_queue.append(ti)
         else:
             skipped_no_cache += 1
@@ -421,6 +434,7 @@ def run_scan(
                 ticker = _normalize_ticker(row.get("Ticker", ""))
                 sr = ScanResult(
                     ticker=ticker,
+                    market=str(row.get("Market", "a_share")),
                     name=row.get("Name", ""),
                     sector=row.get("Sector", ""),
                     industry=row.get("Industry", ""),
@@ -535,11 +549,18 @@ def run_scan(
 def _analyse_one_ticker(ticker_info: TickerInfo) -> ScanResult:
     """Load cached CSV and run the analysis pipeline.  Sits inside a ThreadPool."""
     ticker = ticker_info.ticker
+    market = ticker_info.market
     try:
-        df = _load_cache(ticker)
+        # Use the cache key matching download_ticker's naming convention
+        cache_key = f"{ticker}__us" if market == "us" else f"{ticker}__eastmoney"
+        df = _load_cache(cache_key)
+        if df is None or df.empty or len(df) < 20:
+            # Fallback: try old cache format
+            df = _load_cache(ticker)
         if df is None or df.empty or len(df) < 20:
             return ScanResult(
                 ticker=ticker,
+                market=market,
                 name=ticker_info.name,
                 sector=ticker_info.sector,
                 industry=ticker_info.industry,
@@ -548,7 +569,7 @@ def _analyse_one_ticker(ticker_info: TickerInfo) -> ScanResult:
             )
         return scan_single_from_df(ticker_info, df)
     except Exception as exc:
-        return ScanResult(ticker=ticker, name=ticker_info.name, error=str(exc))
+        return ScanResult(ticker=ticker, market=market, name=ticker_info.name, error=str(exc))
 
 
 # ======================================================================

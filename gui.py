@@ -31,6 +31,7 @@ class ScannerGUI:
         self.root.minsize(1100, 650)
         self.process: subprocess.Popen[str] | None = None
         self.scope = tk.StringVar(value="全部股票和ETF")
+        self.market = tk.StringVar(value="a_share")
         self.tickers = tk.StringVar()
         self.search = tk.StringVar()
         self.sector_filter = tk.StringVar(value="全部板块")
@@ -129,13 +130,18 @@ class ScannerGUI:
         command = [sys.executable, str(MAIN_FILE), "scan"]
         if self.tickers.get().strip():
             command += ["--tickers", self.tickers.get().strip()]
-        elif self.scope.get() == "仅股票":
+        elif self.market.get() == "us":
+            command.append("--us-only")
+        elif self.market.get() == "all":
+            command.append("--include-us")
+        if self.market.get() != "us" and self.scope.get() == "仅股票":
             command.append("--stocks-only")
-        elif self.scope.get() == "仅ETF":
+        elif self.market.get() != "us" and self.scope.get() == "仅ETF":
             command.append("--etfs-only")
         if self.no_resume.get(): command.append("--no-resume")
         if self.force_download.get(): command.append("--force-download")
-        command += ["--data-source", self.data_source.get()]
+        if self.market.get() != "us":
+            command += ["--data-source", self.data_source.get()]
         return command
 
     def start_scan(self) -> None:
@@ -188,6 +194,17 @@ class ScannerGUI:
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
+
+    def _market_changed(self, _event=None) -> None:
+        labels = {"a_share": "A股（沪深京）", "us": "美股（NYSE/NASDAQ）", "all": "A股 + 美股"}
+        market = self.market.get()
+        self.market_label.config(text=labels[market])
+        self.status.set(f"已切换市场：{labels[market]}")
+        is_us_only = market == "us"
+        self.source_box.config(state="disabled" if is_us_only else "readonly")
+        if is_us_only:
+            self.data_source_label.set("当前：Yahoo Finance")
+            self.scope.set("仅股票")
 
     def _data_source_changed(self, _event=None) -> None:
         labels = {"eastmoney": "东方财富", "sina": "新浪", "tencent": "腾讯"}

@@ -1,5 +1,5 @@
 """
-InstitutionScanner — config.py
+ScannerGui — config.py
 
 Central configuration for the Institutional Accumulation Scanner.
 All tunable parameters live here so no magic numbers appear in application code.
@@ -41,6 +41,43 @@ EXCLUDED_SECURITY_KEYWORDS: tuple[str, ...] = (
     "REIT",
     "浙商沪",
 )
+# ======================================================================
+# Market-specific configurations (A-share vs US stocks)
+# ======================================================================
+
+@dataclass(frozen=True)
+class MarketConfig:
+    """Market-specific thresholds and filters."""
+    label: str
+    currency: str
+    min_price: float = 5.0
+    max_price: float = 800.0
+    min_volume: int = 200_000
+    min_market_cap: float = 1e8
+    excluded_keywords: tuple[str, ...] = ()
+    bear_decline_pct: float = -20.0
+    download_threads: int = 2
+
+
+A_SHARE_CONFIG: Final[MarketConfig] = MarketConfig(
+    label="A股", currency="元", min_price=5.0, max_price=800.0,
+    min_volume=200_000, min_market_cap=1e8,
+    excluded_keywords=("债", "货币", "同业存单", "短融", "中票", "REIT", "浙商沪"),
+    bear_decline_pct=-20.0, download_threads=2,
+)
+
+US_STOCK_CONFIG: Final[MarketConfig] = MarketConfig(
+    label="美股", currency="USD", min_price=5.0, max_price=5000.0,
+    min_volume=200_000, min_market_cap=1e8,
+    excluded_keywords=(),
+    bear_decline_pct=-30.0, download_threads=2,
+)
+
+# Shortcut for backward compatibility
+MARKET_CONFIGS: Final[dict[str, MarketConfig]] = {
+    "a_share": A_SHARE_CONFIG,
+    "us": US_STOCK_CONFIG,
+}
 
 # ======================================================================
 # Data Download

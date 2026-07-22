@@ -31,7 +31,7 @@ from config import (
     VOLUME_PROFILE_LOOKBACK,
 )
 
-logger = logging.getLogger("institution_scanner.score")
+logger = logging.getLogger("scanner_gui.score")
 
 
 # ======================================================================

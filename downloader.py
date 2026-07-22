@@ -24,6 +24,11 @@ from typing import Any
 import pandas as pd
 import requests
 from tqdm import tqdm
+try:
+    import yfinance as yf
+    _YFINANCE_AVAILABLE = True
+except ImportError:
+    _YFINANCE_AVAILABLE = False
 
 from config import (
     CACHE_DIR,
@@ -33,6 +38,9 @@ from config import (
     DOWNLOAD_TIMEOUT,
     HISTORY_YEARS,
     LOG_DIR,
+    A_SHARE_CONFIG,
+    US_STOCK_CONFIG,
+    MARKET_CONFIGS,
     MAX_DOWNLOAD_ERRORS,
     MIN_MARKET_CAP,
     EXCLUDED_SECURITY_KEYWORDS,
@@ -40,7 +48,7 @@ from config import (
     MIN_VOLUME,
 )
 
-logger = logging.getLogger("institution_scanner.downloader")
+logger = logging.getLogger("scanner_gui.downloader")
 logger.setLevel(logging.DEBUG)
 
 # Attach a rotating file handler so we don't lose logs
@@ -84,8 +92,9 @@ def _eastmoney_get(path: str, params: dict[str, Any], history: bool = False) -> 
 
 @dataclass
 class TickerInfo:
-    """Minimal metadata for a single ticker."""
+    """Metadata for a single ticker, including which market it belongs to."""
     ticker: str
+    market: str = "a_share"
     name: str = ""
     exchange: str = ""
     sector: str = ""
@@ -311,9 +320,15 @@ def _fetch_a_share_etfs() -> list[TickerInfo]:
 def build_ticker_universe(
     include_stocks: bool = True,
     include_etfs: bool = True,
+    include_us: bool = False,
 ) -> tuple[list[TickerInfo], list[TickerInfo]]:
     """
     Build the complete ticker universe.
+
+    Args:
+        include_stocks: Include A-share stocks.
+        include_etfs: Include A-share ETFs.
+        include_us: Also include US stocks and ETFs.
 
     Returns:
         (stocks, etfs) — two lists of TickerInfo.
@@ -335,12 +350,30 @@ def build_ticker_universe(
             if key not in etfs:
                 etfs[key] = ti
 
-    stock_list = sorted(stocks.values(), key=lambda x: x.ticker)
-    etf_list = sorted(etfs.values(), key=lambda x: x.ticker)
+    if include_us and _YFINANCE_AVAILABLE:
+        logger.info("Fetching US stock universe (S&P 500 + NASDAQ 100)...")
+        for ti in _fetch_us_stocks():
+            if not ti.is_etf:
+                key = ti.ticker.upper()
+                if key not in stocks:
+                    stocks[key] = ti
+        logger.info("Adding US ETFs...")
+        for ti in _fetch_us_etfs():
+            key = ti.ticker.upper()
+            if key not in etfs:
+                etfs[key] = ti
+    elif include_us:
+        logger.warning("US stocks requested but yfinance not installed — skipping.")
 
+    stock_list = sorted(stocks.values(), key=lambda x: (x.market, x.ticker))
+    etf_list = sorted(etfs.values(), key=lambda x: (x.market, x.ticker))
+
+    us_stocks = sum(1 for s in stock_list if s.market == "us")
+    us_etfs = sum(1 for e in etf_list if e.market == "us")
     logger.info(
-        "Universe built: %d stocks, %d ETFs",
-        len(stock_list), len(etf_list),
+        "Universe built: %d stocks (%d US) + %d ETFs (%d US)",
+        len(stock_list), us_stocks,
+        len(etf_list), us_etfs,
     )
     return stock_list, etf_list
 
@@ -607,7 +640,9 @@ def get_data_source_label(source: str) -> str:
     return _DATA_SOURCE_LABELS[normalize_data_source(source)]
 
 
-def _download_single(ticker: str, source: str = "eastmoney") -> pd.DataFrame | None:
+def _download_single(ticker: str, source: str = "eastmoney", market: str = "a_share") -> pd.DataFrame | None:
+    if market == "us":
+        return _download_from_yfinance(ticker)
     selected = normalize_data_source(source)
     loaders = {
         "eastmoney": _download_from_eastmoney,
@@ -623,25 +658,25 @@ def _download_single(ticker: str, source: str = "eastmoney") -> pd.DataFrame | N
         return None
 
 
-def download_ticker(ticker: str, force: bool = False, source: str = "eastmoney") -> pd.DataFrame | None:
+def download_ticker(ticker: str, force: bool = False, source: str = "eastmoney", market: str = "a_share") -> pd.DataFrame | None:
     """
     Get OHLCV data for *ticker*.
     - If cached data exists, load it and download only the missing tail.
     - If *force* is True, re-download everything.
     """
     selected = normalize_data_source(source)
-    cache_ticker = f"{ticker}__{selected}"
+    cache_key = f"{ticker}__us" if market == "us" else f"{ticker}__{selected}"
     if force:
-        df = _download_single(ticker, selected)
+        df = _download_single(ticker, selected, market)
         if df is not None:
-            _save_cache(cache_ticker, df)
+            _save_cache(cache_key, df)
         return df
 
-    cached = _load_cache(cache_ticker)
+    cached = _load_cache(cache_key)
     if cached is None:
-        df = _download_single(ticker, selected)
+        df = _download_single(ticker, selected, market)
         if df is not None:
-            _save_cache(cache_ticker, df)
+            _save_cache(cache_key, df)
         return df
 
     # Incremental update: download only from the last cached date
@@ -659,7 +694,7 @@ def download_ticker(ticker: str, force: bool = False, source: str = "eastmoney")
         return cached  # already up-to-date
 
     try:
-        full_df = _download_single(ticker, selected)
+        full_df = _download_single(ticker, selected, market)
         new_df = full_df.loc[full_df.index > pd.Timestamp(last_date)] if full_df is not None else None
         if new_df is not None and not new_df.empty:
             new_df = new_df.rename(columns={
@@ -680,7 +715,7 @@ def download_ticker(ticker: str, force: bool = False, source: str = "eastmoney")
                 combined = pd.concat([cached, new_df])
                 combined = combined[~combined.index.duplicated(keep="last")]
                 combined = combined.sort_index()
-                _save_cache(cache_ticker, combined)
+                _save_cache(cache_key, combined)
                 return combined
     except Exception as exc:
         logger.debug("Incremental update failed for %s: %s — using cache as-is.", ticker, exc)
@@ -714,12 +749,15 @@ def download_batch(
     total = len(symbols)
     skipped_delisted = 0
 
-    # Single-threaded download with inter-request pause (respects Yahoo's
-    # ~60 req/min soft limit).  Parallel path kept for DOWNLOAD_THREADS > 1.
+    # Build ticker->market map for routing downloads
+    market_map = {t.ticker: t.market for t in tickers}
+
+    # Single-threaded download with inter-request pause
     if DOWNLOAD_THREADS <= 1:
         for sym in tqdm(symbols, desc=desc, unit="ticker"):
             try:
-                df = download_ticker(sym, force=force, source=source)
+                df = download_ticker(sym, force=force, source=source,
+                                     market=market_map.get(sym, "a_share"))
                 if df is not None and not df.empty:
                     results[sym] = df
                 else:
@@ -730,7 +768,8 @@ def download_batch(
     else:
         with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as pool:
             futures: dict[Any, str] = {
-                pool.submit(download_ticker, sym, force, source): sym for sym in symbols
+                pool.submit(download_ticker, sym, force, source, market_map.get(sym, "a_share")): sym
+                for sym in symbols
             }
 
             for future in tqdm(

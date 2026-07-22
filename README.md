@@ -1,6 +1,6 @@
-# InstitutionScanner — 机构吸筹扫描器
+# ScannerGui — 多市场机构吸筹扫描器
 
-**Institutional Accumulation Scanner** 是一个 Python 量化工具，专门寻找处于长期熊市底部、被大资金持续放量承接、但价格尚未启动的美股和 ETF。
+**Institutional Accumulation Scanner** 是一个 Python 量化工具，同时支持 **A股（沪深京）** 和 **美股（NYSE/NASDAQ）**，专门寻找处于长期熊市底部、被大资金持续放量承接、但价格尚未启动的股票和 ETF。
 
 ---
 
@@ -37,7 +37,7 @@
 ### 安装
 
 ```bash
-cd InstitutionScanner
+cd ScannerGui
 pip install --break-system-packages -r requirements.txt
 ```
 
@@ -66,6 +66,24 @@ python main.py download
 python main.py clean
 ```
 
+# 美股扫描
+
+```bash
+# 仅扫描美股（S&P 500 + NASDAQ 100 + 高流动性 ETF）
+python main.py scan --us-only
+
+# 同时扫描 A股 + 美股
+python main.py scan --include-us
+```
+
+美股数据通过 **yfinance**（Yahoo Finance）获取，无需 API Key。
+
+美股 universe 包含：
+
+- **S&P 500**（来自 Wikipedia）
+- **NASDAQ 100**（来自 Wikipedia）
+- **22 只高流动性 ETF**（SPY, QQQ, TLT, GLD, XLF, XLK 等）
+
 ### 输出文件
 
 | 文件                          | 说明                      |
@@ -83,7 +101,7 @@ python main.py clean
 
 ```bash
 # 构建镜像
-docker build -t institution-scanner .
+docker build -t scanner-gui .
 
 # 方式一：docker compose
 docker compose up
@@ -93,7 +111,7 @@ docker run --rm \
   -v $(pwd)/cache:/app/cache \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/logs:/app/logs \
-  institution-scanner \
+  scanner-gui \
   python main.py scan --etfs-only
 ```
 
@@ -106,7 +124,7 @@ docker run --rm \
 ## 项目结构
 
 ```
-InstitutionScanner/
+ScannerGui/
 ├── config.py          # 所有可调参数
 ├── main.py            # CLI 入口
 ├── scanner.py         # 扫描编排引擎
@@ -163,16 +181,19 @@ SCAN_THREADS = 12         # 分析线程数（numpy 向量化释放 GIL，12 线
 
 ## 数据源
 
-- **行情数据**：[yfinance](https://github.com/ranaroussi/yfinance)（Yahoo Finance）
-- **Ticker 列表**：NASDAQ Trader FTP、Wikipedia S&P 500、ETFdb
-- 全部免费，无需 API Key
+| 市场 | 行情数据源                                        | Ticker 列表                                  |
+| ---- | ------------------------------------------------- | -------------------------------------------- |
+| A股  | 东方财富 / 新浪 / 腾讯（可选回退）                | 东方财富 API（~5000 只）                     |
+| 美股 | [yfinance](https://github.com/ranaroussi/yfinance) | Wikipedia S&P 500、NASDAQ 100、本地 ETF 列表 |
+
+全部免费，无需 API Key。
 
 ---
 
 ## 注意事项
 
 1. **首次运行**会下载所有 ticker 的 10 年历史数据，耗时较长，请耐心等待。
-2. **yfinance 有速率限制**，项目内置了批次延迟和重试机制。如果遇到 401/429 错误，增大 `DOWNLOAD_RATE_LIMIT_PAUSE` 或降低 `DOWNLOAD_THREADS`。
+2. **yfinance 有速率限制**，项目内置了批次延迟和重试机制。美股数据通过 yfinance 下载，A股数据通过东方财富下载，各有独立的限流策略。如果遇到 401/429 错误，增大 `DOWNLOAD_RATE_LIMIT_PAUSE` 或降低 `DOWNLOAD_THREADS`。
 3. **Docker 环境**中，cache 和 output 目录已挂载到宿主机，不会丢失数据。
 4. **增量化**：第二次运行只下载新增的 K 线，速度极快。
 5. **免责声明**：本工具仅供研究和学习使用，不构成任何投资建议。过往表现不代表未来收益。

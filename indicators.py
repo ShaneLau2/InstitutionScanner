@@ -52,7 +52,7 @@ from config import (
     VWAP_PERIOD,
 )
 
-logger = logging.getLogger("institution_scanner.indicators")
+logger = logging.getLogger("scanner_gui.indicators")
 
 
 # ======================================================================

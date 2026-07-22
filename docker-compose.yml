@@ -4,8 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     command: tail -f /dev/null
-    image: institution-scanner:latest
-    container_name: institution-scanner
+    image: scanner-gui:latest
+    container_name: scanner-gui
     volumes:
       # Persist cache so incremental downloads work across runs
       - ./cache:/app/cache

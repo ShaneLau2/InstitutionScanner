@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 from config import OUTPUT_DIR, TOP_N_PARQUET, TOP_N_REPORT
 from scanner import ScanResult, ScanReport
 
-logger = logging.getLogger("institution_scanner.report")
+logger = logging.getLogger("scanner_gui.report")
 
 
 # ======================================================================
@@ -65,6 +65,7 @@ def _results_to_dataframe(results: list[ScanResult]) -> pd.DataFrame:
         rows.append({
             "Ticker": r.ticker,
             "Name": r.name,
+            "Market": r.market,
             "Sector": r.sector,
             "Industry": r.industry,
             "IsETF": r.is_etf,
