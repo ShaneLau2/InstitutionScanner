@@ -32,7 +32,10 @@ MIN_PRICE: float = 5.0        # Minimum close price (CNY) — ignore penny stock
 MAX_PRICE: float = 800.0      # Maximum close price for A-shares
 MIN_VOLUME: int = 200_000     # Minimum daily volume (shares)
 MIN_MARKET_CAP: float = 1e8    # Minimum market cap (CNY) — ignore micro-caps
-EXCLUDED_SECURITY_KEYWORDS: tuple[str, ...] = (
+# Deprecated — use A_SHARE_CONFIG.excluded_keywords instead.
+# Kept here for backward compatibility with imports.
+EXCLUDED_SECURITY_KEYWORDS = property(lambda self: A_SHARE_CONFIG.excluded_keywords)
+_EXCLUDED_SECURITY_KEYWORDS: tuple[str, ...] = (
     "债",
     "货币",
     "同业存单",
@@ -41,6 +44,8 @@ EXCLUDED_SECURITY_KEYWORDS: tuple[str, ...] = (
     "REIT",
     "浙商沪",
 )
+# Legacy alias for module-level imports (downloader._is_excluded_security_name)
+EXCLUDED_SECURITY_KEYWORDS = _EXCLUDED_SECURITY_KEYWORDS
 # ======================================================================
 # Market-specific configurations (A-share vs US stocks)
 # ======================================================================
@@ -98,18 +103,6 @@ DOWNLOAD_RATE_LIMIT_PAUSE: float = 1.0
 DOWNLOAD_RETRIES: int = 2                # retries on transient errors (401s, 429s, timeouts) — don't waste time retrying dead URLs
 DOWNLOAD_TIMEOUT: int = 10               # seconds per ticker (lower = less accumulated delay on dead URLs)
 MAX_DOWNLOAD_ERRORS: int = 2000          # abort if this many consecutive errors (harmless 404s from delisted tickers are common)
-
-# Ticker list sources (free, no API key required)
-TICKER_SOURCES: list[str] = field(default_factory=lambda: [
-    # NASDAQ official FTP lists
-    "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt",
-    # Alternative free sources (used as fallback)
-])
-
-# ETF list sources
-ETF_SOURCES: list[str] = field(default_factory=lambda: [
-    # Common free ETF lists
-])
 
 # ======================================================================
 # Indicator Parameters

@@ -125,7 +125,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if not include_a_shares and include_us:
             logger.info("Building US stock universe only...")
             stock_universe, etf_universe = build_ticker_universe(
-                include_stocks=False, include_etfs=False, include_us=True,
+                include_stocks=include_stocks,
+                include_etfs=include_etfs,
+                include_us=True,
             )
         elif include_stocks or include_etfs:
             logger.info("Building ticker universe (stocks=%s, ETFs=%s, US=%s)...",

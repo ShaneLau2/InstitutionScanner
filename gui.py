@@ -76,10 +76,18 @@ class ScannerGUI:
         ttk.Label(controls, text="指定代码").grid(row=0, column=2, padx=(0, 6), sticky=tk.W)
         ttk.Entry(controls, textvariable=self.tickers, width=38).grid(row=0, column=3, padx=(0, 8), sticky=tk.W)
         ttk.Label(controls, text="例：588000.SH,000001.SZ", foreground="#708399").grid(row=0, column=4, sticky=tk.W)
+        # Market selector
+        ttk.Label(controls, text="市场").grid(row=0, column=5, padx=(12, 4), sticky=tk.W)
+        self.market_box = ttk.Combobox(controls, textvariable=self.market, values=("a_share", "us", "all"), state="readonly", width=10)
+        self.market_box.grid(row=0, column=6, padx=(0, 4), sticky=tk.W)
+        self.market_box.bind("<<ComboboxSelected>>", self._market_changed)
+        self.market_label = ttk.Label(controls, text="A股（沪深京）", foreground="#55708a")
+        self.market_label.grid(row=0, column=7, padx=(4, 0), sticky=tk.W)
+        # Data source selector (A-shares only)
         self.source_box = ttk.Combobox(controls, textvariable=self.data_source, values=("eastmoney", "sina", "tencent"), state="readonly", width=12)
-        self.source_box.grid(row=0, column=5, padx=(12, 4), sticky=tk.W)
+        self.source_box.grid(row=0, column=8, padx=(12, 4), sticky=tk.W)
         self.source_box.bind("<<ComboboxSelected>>", self._data_source_changed)
-        ttk.Label(controls, textvariable=self.data_source_label, foreground="#55708a").grid(row=0, column=6, padx=(4, 0), sticky=tk.W)
+        ttk.Label(controls, textvariable=self.data_source_label, foreground="#55708a").grid(row=0, column=9, padx=(4, 0), sticky=tk.W)
         ttk.Checkbutton(controls, text="不使用断点", variable=self.no_resume).grid(row=1, column=0, columnspan=2, pady=(12, 0), sticky=tk.W)
         ttk.Checkbutton(controls, text="强制重新下载", variable=self.force_download).grid(row=1, column=2, columnspan=2, pady=(12, 0), sticky=tk.W)
         self.start_button = ttk.Button(controls, text="▶ 开始扫描", style="Accent.TButton", command=self.start_scan)
@@ -203,8 +211,13 @@ class ScannerGUI:
         is_us_only = market == "us"
         self.source_box.config(state="disabled" if is_us_only else "readonly")
         if is_us_only:
+            self._prev_scope = self.scope.get()
             self.data_source_label.set("当前：Yahoo Finance")
             self.scope.set("仅股票")
+        else:
+            self.data_source_label.set("当前：东方财富")
+            if hasattr(self, "_prev_scope"):
+                self.scope.set(self._prev_scope)
 
     def _data_source_changed(self, _event=None) -> None:
         labels = {"eastmoney": "东方财富", "sina": "新浪", "tencent": "腾讯"}

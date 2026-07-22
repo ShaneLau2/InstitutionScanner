@@ -157,9 +157,7 @@ _STATIC_A_ETFS: list[tuple[str, str]] = [
     ("159996.SZ", "新能源车ETF"),
     ("512980.SH", "证券ETF"),
     ("510880.SH", "红利ETF"),
-    ("159915.SZ", "创业板ETF"),
     ("159997.SZ", "芯片ETF"),
-    ("159996.SZ", "新能源ETF"),
 ]
 
 # ---- Ticker validation (no regex — simple rules) ----
@@ -440,7 +438,7 @@ def _load_meta(ticker: str) -> dict | None:
         return None
 
 
-def _fetch_market_cap_from_yf(ticker: str) -> float | None:
+def _fetch_market_cap_from_eastmoney(ticker: str) -> float | None:
     """
     Fetch market cap from yfinance Ticker.info for a single ticker.
 
@@ -474,7 +472,7 @@ def get_market_cap(ticker: str) -> float | None:
         return float(meta["marketCap"])
 
     # Try live fetch
-    mc = _fetch_market_cap_from_yf(ticker)
+    mc = _fetch_market_cap_from_eastmoney(ticker)
     if mc is not None:
         _save_meta(ticker, {"marketCap": mc, "fetchedAt": datetime.now().isoformat()})
         return mc

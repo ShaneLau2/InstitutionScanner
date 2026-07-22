@@ -185,6 +185,7 @@ def scan_single_from_df(
             except Exception as exc:
                 return ScanResult(
                     ticker=ticker,
+                    market=market,
                     name=ticker_info.name,
                     sector=ticker_info.sector,
                     industry=ticker_info.industry,
@@ -195,6 +196,7 @@ def scan_single_from_df(
         if not ticker_info.is_etf and market_cap is not None and market_cap < MIN_MARKET_CAP:
             return ScanResult(
                 ticker=ticker,
+                market=market,
                 name=ticker_info.name,
                 sector=ticker_info.sector,
                 industry=ticker_info.industry,
@@ -272,6 +274,7 @@ def scan_single_from_df(
         logger.debug("Error scanning %s: %s", ticker, exc)
         return ScanResult(
             ticker=ticker,
+            market=market if 'market' in dir() else 'a_share',
             name=ticker_info.name,
             is_etf=ticker_info.is_etf,
             error=str(exc),
@@ -299,6 +302,7 @@ def scan_single(
         logger.debug("Error scanning %s: %s", ticker, exc)
         return ScanResult(
             ticker=ticker,
+            market=market if 'market' in dir() else 'a_share',
             name=ticker_info.name,
             is_etf=ticker_info.is_etf,
             error=str(exc),
@@ -481,7 +485,7 @@ def run_scan(
         for ti in analyse_queue:
             # Load DF in main thread (I/O-bound single file read is fast)
             # then submit the CPU-heavy part
-            futures[executor.submit(_analyse_one_ticker, ti)] = ti
+            futures[executor.submit(_analyse_one_ticker, ti, data_source)] = ti
 
         for future in tqdm(
             as_completed(futures),
@@ -546,13 +550,13 @@ def run_scan(
     return report
 
 
-def _analyse_one_ticker(ticker_info: TickerInfo) -> ScanResult:
+def _analyse_one_ticker(ticker_info: TickerInfo, data_source: str = "eastmoney") -> ScanResult:
     """Load cached CSV and run the analysis pipeline.  Sits inside a ThreadPool."""
     ticker = ticker_info.ticker
     market = ticker_info.market
     try:
         # Use the cache key matching download_ticker's naming convention
-        cache_key = f"{ticker}__us" if market == "us" else f"{ticker}__eastmoney"
+        cache_key = f"{ticker}__us" if market == "us" else f"{ticker}__{data_source}"
         df = _load_cache(cache_key)
         if df is None or df.empty or len(df) < 20:
             # Fallback: try old cache format
@@ -589,7 +593,7 @@ def run_parallel_indicator_scan(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_analyse_one_ticker, ti): ti for ti in tickers
+            executor.submit(_analyse_one_ticker, ti, "eastmoney"): ti for ti in tickers
         }
         for future in tqdm(
             as_completed(futures),

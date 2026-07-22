@@ -517,6 +517,7 @@ class AllFilterResults:
         return sum(1 for item in filters if item.passed)
 
     def all_filter_count(self) -> int:
+        """Alias for passed_count — kept for backward compatibility."""
         return self.passed_count()
 
 
