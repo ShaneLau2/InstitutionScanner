@@ -10,6 +10,7 @@ Responsible for:
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import math
@@ -18,6 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -315,6 +317,259 @@ def _fetch_a_share_etfs() -> list[TickerInfo]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# US stock / ETF universe (via NASDAQ traded list + Wikipedia)
+# ---------------------------------------------------------------------------
+
+# Widely-traded US-listed ETFs from major issuers
+_US_ETFS: set[str] = {
+    # US Broad Equity
+    "SPY", "IVV", "VOO", "VTI", "QQQ", "DIA", "IWM", "MDY", "VO", "VB",
+    "IWF", "IWD", "IWB", "RSP", "SCHX", "SCHB", "ITOT",
+    # Sectors
+    "XLF", "XLK", "XLY", "XLP", "XLE", "XLV", "XLI", "XLB", "XLRE", "XLU",
+    "VGT", "VFH", "VHT", "VIS", "VAW", "VNQ", "VPU", "VDE", "VDC", "VOX",
+    # Bonds
+    "TLT", "IEF", "SHY", "AGG", "BND", "LQD", "HYG", "JNK", "TIP", "BIL",
+    "MUB", "VCIT", "VCSH", "VGLT", "VGIT", "VGSH", "BSV",
+    # International
+    "EFA", "EEM", "VXUS", "VEA", "VWO", "IEMG", "EWJ", "EWG", "EWU",
+    "FXI", "KWEB", "ASHR", "INDA", "EWZ", "EWY", "EZA", "RSX",
+    # Commodities
+    "GLD", "IAU", "SLV", "USO", "UNG", "DBC", "DBA", "PDBC",
+    # Inverse / Leveraged
+    "SQQQ", "TQQQ", "SOXS", "SOXL", "UVXY", "SVXY", "LABD", "LABU",
+    "TMF", "TMV", "UUP", "UDOW", "SDOW",
+    # Smart Beta / Thematic
+    "MTUM", "VLUE", "QUAL", "SIZE", "USMV", "HDV", "VYM", "SCHD", "DGRO",
+    "ARKK", "ARKG", "ARKW", "ARKF", "ARKQ", "ICLN", "TAN", "LIT",
+    # VIX
+    "VXX", "VIXY",
+    # Crypto
+    "GBTC", "ETHE",
+    # Real Estate
+    "IYR", "SCHH",
+    # Healthcare
+    "IBB", "XBI",
+    # Tech
+    "IGV", "SOXX", "SMH", "SKYY", "CIBR", "HACK",
+    # Other
+    "XRT", "KRE", "XHB", "XME", "XOP",
+}
+
+
+def _fetch_nasdaq_traded() -> list[TickerInfo]:
+    """
+    Download the official NASDAQ Traded symbols file (free, no API key).
+    Returns a list of TickerInfo for all listed securities.
+    """
+    url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
+    tickers: list[TickerInfo] = []
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        reader = csv.DictReader(
+            StringIO(resp.text),
+            delimiter="|",
+        )
+        skipped = 0
+        for row in reader:
+            symbol = (row.get("NASDAQ Symbol") or "").strip()
+            if not symbol or symbol == "File Creation Time":
+                continue
+            if row.get("Test Issue", "N") == "Y":
+                continue
+            exchange = (row.get("Listing Exchange") or "").strip()
+            if not _is_viable_ticker(symbol, exchange):
+                skipped += 1
+                continue
+            name = (row.get("Security Name") or "").strip()
+            is_etf = row.get("ETF", "N") == "Y"
+            tickers.append(TickerInfo(
+                ticker=symbol,
+                market="us",
+                name=name,
+                exchange=exchange,
+                is_etf=is_etf,
+                asset_type="etf" if is_etf else "stock",
+            ))
+        logger.info(
+            "Fetched %d tickers from NASDAQ traded list (%d filtered).",
+            len(tickers), skipped,
+        )
+    except Exception as exc:
+        logger.warning("Could not fetch NASDAQ traded list: %s", exc)
+    return tickers
+
+
+def _fetch_wikipedia_sp500() -> dict[str, TickerInfo]:
+    """
+    Scrape S&P 500 constituents from Wikipedia for sector/industry metadata.
+    Uses pd.read_html (requires lxml or html5lib).
+    """
+    result: dict[str, TickerInfo] = {}
+    try:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        )
+        df = tables[0]
+        for _, row in df.iterrows():
+            symbol = str(row.get("Symbol", "")).replace(".", "-").strip().upper()
+            name = str(row.get("Security", "")).strip()
+            sector = str(row.get("GICS Sector", "")).strip()
+            industry = str(row.get("GICS Sub-Industry", "")).strip()
+            if symbol:
+                result[symbol] = TickerInfo(
+                    ticker=symbol,
+                    market="us",
+                    name=name,
+                    exchange="NYSE/NASDAQ",
+                    sector=sector,
+                    industry=industry,
+                    asset_type="stock",
+                )
+        logger.info("Fetched %d S&P 500 tickers from Wikipedia.", len(result))
+    except Exception as exc:
+        logger.warning("Could not fetch S&P 500 from Wikipedia: %s", exc)
+    return result
+
+
+def _fetch_us_stocks() -> list[TickerInfo]:
+    """
+    Build US stock universe from NASDAQ traded list + S&P 500 metadata.
+
+    1. Downloads the official NASDAQ traded list (CSV, ~7000 tickers).
+    2. Supplements with S&P 500 sector/industry data from Wikipedia.
+    3. Falls back to a curated list of ~200 major stocks on total failure.
+    """
+    stocks: dict[str, TickerInfo] = {}
+
+    # Primary source: NASDAQ traded list
+    for ti in _fetch_nasdaq_traded():
+        if not ti.is_etf:
+            key = ti.ticker.upper()
+            if key not in stocks:
+                stocks[key] = ti
+
+    # Supplement with S&P 500 metadata
+    for sym, ti in _fetch_wikipedia_sp500().items():
+        key = sym.upper()
+        if key in stocks:
+            existing = stocks[key]
+            if ti.sector and not existing.sector:
+                existing.sector = ti.sector
+            if ti.industry and not existing.industry:
+                existing.industry = ti.industry
+            if ti.name and not existing.name:
+                existing.name = ti.name
+        else:
+            stocks[key] = ti
+
+    # Fallback: if nothing worked, use a curated list of major stocks
+    if not stocks:
+        logger.warning("NASDAQ traded list failed — using fallback US stock list.")
+        fallback = [
+            "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B",
+            "UNH", "JNJ", "V", "PG", "JPM", "HD", "MA", "DIS", "BAC", "NFLX",
+            "ADBE", "CRM", "PYPL", "INTC", "AMD", "CSCO", "CMCSA", "PEP", "KO",
+            "WMT", "COST", "ABNB", "AVGO", "TMO", "ABT", "ACN", "LIN", "NKE",
+            "MRK", "CVX", "WFC", "MS", "ORCL", "IBM", "QCOM", "TXN", "CAT",
+            "GE", "BA", "MMM", "HON", "RTX", "LMT", "GS", "BLK", "AXP", "C",
+            "UPS", "FDX", "SBUX", "MCD", "NEE", "DUK", "SO", "AMT", "CCI",
+            "PLD", "EQIX", "SPG", "PSA", "WELL", "ISRG", "SYK", "BSX", "MDT",
+            "LRCX", "AMAT", "MU", "KLAC", "ADI", "F", "GM", "AAL", "UAL",
+            "DAL", "LUV", "SAP", "TM", "SONY", "BABA", "JD", "PDD", "NIO",
+            "LI", "XPEV", "RIVN", "LCID", "UBER", "LYFT", "SNAP", "PINS",
+            "SPOT", "RBLX", "ZM", "CRWD", "DDOG", "PLTR", "SNOW", "NET",
+            "MRNA", "BNTX", "PFE", "JNJ", "LLY", "NVO", "AZN", "SNY", "GSK",
+            "XOM", "CVX", "SHEL", "TTE", "BP", "COP", "EOG", "SLB", "HAL",
+            "C", "BAC", "WFC", "JPM", "GS", "MS", "AXP", "V", "MA", "PYPL",
+            "BRK.B", "MET", "PRU", "AIG", "ALL", "TRV", "CB", "MMC", "AON",
+        ]
+        for sym in fallback:
+            stocks[sym] = TickerInfo(
+                ticker=sym,
+                market="us",
+                exchange="NASDAQ/NYSE",
+                asset_type="stock",
+            )
+
+    result = sorted(stocks.values(), key=lambda x: x.ticker)
+    logger.info("US stock universe: %d tickers.", len(result))
+    return result
+
+
+def _fetch_us_etfs() -> list[TickerInfo]:
+    """
+    Build US ETF universe from NASDAQ traded list + static curated list.
+    """
+    etfs: dict[str, TickerInfo] = {}
+
+    # NASDAQ traded list (ETF flag)
+    for ti in _fetch_nasdaq_traded():
+        if ti.is_etf:
+            key = ti.ticker.upper()
+            if key not in etfs:
+                etfs[key] = ti
+
+    # Static curated list (covers many that NASDAQ list might miss)
+    for sym in _US_ETFS:
+        key = sym.upper()
+        if key not in etfs:
+            etfs[key] = TickerInfo(
+                ticker=sym, market="us", is_etf=True, asset_type="etf",
+            )
+
+    result = sorted(etfs.values(), key=lambda x: x.ticker)
+    logger.info("US ETF universe: %d tickers.", len(result))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# yfinance data downloader
+# ---------------------------------------------------------------------------
+
+def _download_from_yfinance(ticker: str) -> pd.DataFrame | None:
+    """
+    Download OHLCV history for *ticker* using yfinance.
+
+    Returns a DataFrame with columns Open, High, Low, Close, Volume,
+    indexed by Date (datetime), or None on failure.
+    """
+    if not _YFINANCE_AVAILABLE:
+        logger.warning("yfinance not available — cannot download %s.", ticker)
+        return None
+    try:
+        yf_ticker = yf.Ticker(ticker)
+        df = yf_ticker.history(period=f"{HISTORY_YEARS}y")
+        if df is None or df.empty:
+            logger.debug("yfinance returned no data for %s.", ticker)
+            return None
+        # Keep only OHLCV columns
+        keep = {"Open", "High", "Low", "Close", "Volume"}
+        df = df[[c for c in keep if c in df.columns]]
+        if df.empty:
+            return None
+        # Remove timezone info for consistency with A-share data
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        # Rename to match expected column names
+        df = df.rename(columns={
+            "Open": "Open", "High": "High", "Low": "Low",
+            "Close": "Close", "Volume": "Volume",
+        })
+        df = df[["Open", "High", "Low", "Close", "Volume"]]
+        df = df.dropna(subset=["Close"])
+        df = df.sort_index()
+        if df.empty:
+            return None
+        logger.debug("Downloaded %d rows for %s via yfinance.", len(df), ticker)
+        return df
+    except Exception as exc:
+        logger.debug("yfinance download failed for %s: %s", ticker, exc)
+        return None
+
+
 def build_ticker_universe(
     include_stocks: bool = True,
     include_etfs: bool = True,
@@ -349,7 +604,7 @@ def build_ticker_universe(
                 etfs[key] = ti
 
     if include_us and _YFINANCE_AVAILABLE:
-        logger.info("Fetching US stock universe (S&P 500 + NASDAQ 100)...")
+        logger.info("Fetching US stock universe (NASDAQ traded + S&P 500)...")
         for ti in _fetch_us_stocks():
             if not ti.is_etf:
                 key = ti.ticker.upper()
@@ -381,16 +636,50 @@ def build_ticker_universe(
 # ---------------------------------------------------------------------------
 
 def _cache_path(ticker: str) -> Path:
-    """File path for a ticker's cached CSV."""
+    """File path for a ticker's cached CSV.
+
+    Uses subdirectories per market: cache/a_share/ and cache/us/.
+    The cache key format is {ticker}__{source} (A-shares) or {ticker}__us (US).
+    """
+    safe = ticker.replace("/", "_").replace("\\", "_")
+    if safe.endswith("__us"):
+        clean = safe[:-4]  # strip __us suffix
+        return CACHE_DIR / "us" / f"{clean}.csv"
+    else:
+        # A-share: strip source suffix (__eastmoney, __sina, __tencent)
+        for src in ("__eastmoney", "__sina", "__tencent"):
+            if safe.endswith(src):
+                clean = safe[:-len(src)]
+                return CACHE_DIR / "a_share" / f"{clean}.csv"
+        # Fallback: keep original key in a_share (e.g. legacy ticker without suffix)
+        return CACHE_DIR / "a_share" / f"{safe}.csv"
+
+
+def _legacy_cache_path(ticker: str) -> Path:
+    """Old flat cache path — used for backward-compatible migration."""
     safe = ticker.replace("/", "_").replace("\\", "_")
     return CACHE_DIR / f"{safe}.csv"
 
 
 def _load_cache(ticker: str) -> pd.DataFrame | None:
-    """Load cached OHLCV data for a ticker, or None if not found / corrupted."""
+    """Load cached OHLCV data for a ticker, or None if not found / corrupted.
+
+    Checks the market-subdirectory path first; falls back to legacy flat
+    path and migrates data if found.
+    """
     path = _cache_path(ticker)
     if not path.exists():
-        return None
+        # Try legacy flat path for backward compat
+        legacy = _legacy_cache_path(ticker)
+        if not legacy.exists():
+            return None
+        # Migrate: copy from legacy to new path
+        try:
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.replace(path)
+            logger.debug("Migrated cache %s → %s", legacy.name, path)
+        except Exception:
+            path = legacy  # fall back to legacy path
     try:
         df = pd.read_csv(path, index_col=0, parse_dates=True)
         if df.empty:
@@ -409,6 +698,7 @@ def _load_cache(ticker: str) -> pd.DataFrame | None:
 def _save_cache(ticker: str, df: pd.DataFrame) -> None:
     """Persist OHLCV data to CSV."""
     path = _cache_path(ticker)
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path)
 
 

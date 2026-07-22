@@ -11,7 +11,7 @@ Produces:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +23,39 @@ from config import OUTPUT_DIR, TOP_N_PARQUET, TOP_N_REPORT
 from scanner import ScanResult, ScanReport
 
 logger = logging.getLogger("scanner_gui.report")
+
+
+# ======================================================================
+# Filename helpers
+# ======================================================================
+
+
+def _today_str() -> str:
+    """Return today's date as YYYYMMDD string."""
+    return date.today().strftime("%Y%m%d")
+
+
+def market_output_filename(base: str, market: str = "a_share") -> str:
+    """
+    Build a market+date prefixed filename.
+
+    E.g. market_output_filename("Top50.csv", "us") -> "us_20260722_Top50.csv"
+    """
+    return f"{market}_{_today_str()}_{base}"
+
+
+def resolve_latest_file(base: str, market: str = "a_share") -> Path:
+    """
+    Return the path to today's market-specific file, falling back to
+    the plain (legacy) filename.
+    """
+    prefixed = OUTPUT_DIR / market_output_filename(base, market)
+    if prefixed.exists():
+        return prefixed
+    legacy = OUTPUT_DIR / base
+    if legacy.exists():
+        return legacy
+    return prefixed  # caller handles non-existence
 
 
 # ======================================================================
@@ -116,25 +149,27 @@ def _results_to_dataframe(results: list[ScanResult]) -> pd.DataFrame:
 # CSV Export
 # ======================================================================
 
-def export_top_csv(results: list[ScanResult], n: int = TOP_N_REPORT) -> Path:
+def export_top_csv(results: list[ScanResult], n: int = TOP_N_REPORT, market: str = "a_share") -> Path:
     """
-    Export the top *n* tickers to TopN.csv.
+    Export the top *n* tickers to {market}_{date}_Top{n}.csv.
 
     Returns the path to the generated file.
     """
     df = _results_to_dataframe(_rankable_results(results))
     top = df.head(n)
 
-    path = OUTPUT_DIR / f"Top{n}.csv"
+    path = OUTPUT_DIR / market_output_filename(f"Top{n}.csv", market)
     top.to_csv(path, index=False, encoding="utf-8-sig")
     logger.info("Exported Top %d to %s", n, path)
     return path
 
 
-def export_full_csv(results: list[ScanResult]) -> Path:
-    """Export ALL scored tickers to AllResults.csv."""
+def export_full_csv(results: list[ScanResult], market: str = "a_share") -> Path:
+    """
+    Export ALL scored tickers to {market}_{date}_AllResults.csv.
+    """
     df = _results_to_dataframe(results)
-    path = OUTPUT_DIR / "AllResults.csv"
+    path = OUTPUT_DIR / market_output_filename("AllResults.csv", market)
     df.to_csv(path, index=False, encoding="utf-8-sig")
     logger.info("Exported all %d results to %s", len(df), path)
     return path
@@ -144,16 +179,16 @@ def export_full_csv(results: list[ScanResult]) -> Path:
 # Parquet Export
 # ======================================================================
 
-def export_top_parquet(results: list[ScanResult], n: int = TOP_N_PARQUET) -> Path:
+def export_top_parquet(results: list[ScanResult], n: int = TOP_N_PARQUET, market: str = "a_share") -> Path:
     """
-    Export top *n* tickers to Top200.parquet.
+    Export top *n* tickers to {market}_{date}_Top{n}.parquet.
 
     Returns the path to the generated file.
     """
     df = _results_to_dataframe(_rankable_results(results))
     top = df.head(n)
 
-    path = OUTPUT_DIR / f"Top{n}.parquet"
+    path = OUTPUT_DIR / market_output_filename(f"Top{n}.parquet", market)
     table = pa.Table.from_pandas(top)
     pq.write_table(table, path)
     logger.info("Exported Top %d to %s", n, path)
@@ -168,19 +203,22 @@ def export_all(
     results: list[ScanResult],
     top_n_csv: int = TOP_N_REPORT,
     top_n_parquet: int = TOP_N_PARQUET,
+    market: str = "a_share",
 ) -> tuple[Path, Path, Path, Path]:
     """Export CSV, Parquet, and full results. Returns (csv_path, parquet_path, full_csv, full_parquet)."""
-    csv_path = export_top_csv(results, n=top_n_csv)
-    parquet_path = export_top_parquet(results, n=top_n_parquet)
-    full_csv = export_full_csv(results)
-    full_parquet_path = export_full_parquet(results)
+    csv_path = export_top_csv(results, n=top_n_csv, market=market)
+    parquet_path = export_top_parquet(results, n=top_n_parquet, market=market)
+    full_csv = export_full_csv(results, market=market)
+    full_parquet_path = export_full_parquet(results, market=market)
     return csv_path, parquet_path, full_csv, full_parquet_path
 
 
-def export_full_parquet(results: list[ScanResult]) -> Path:
-    """Export ALL scored tickers to AllResults.parquet."""
+def export_full_parquet(results: list[ScanResult], market: str = "a_share") -> Path:
+    """
+    Export ALL scored tickers to {market}_{date}_AllResults.parquet.
+    """
     df = _results_to_dataframe(results)
-    path = OUTPUT_DIR / "AllResults.parquet"
+    path = OUTPUT_DIR / market_output_filename("AllResults.parquet", market)
     table = pa.Table.from_pandas(df)
     pq.write_table(table, path)
     logger.info("Exported all %d results to %s", len(df), path)

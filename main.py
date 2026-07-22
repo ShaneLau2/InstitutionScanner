@@ -110,6 +110,78 @@ def cmd_scan(args: argparse.Namespace) -> int:
         include_stocks = True
         include_etfs = True
 
+    # Determine market label for output filenames
+    if args.us_only:
+        market_label = "us"
+    elif args.include_us:
+        market_label = "all"
+    else:
+        market_label = "a_share"
+
+    # ---- Cache check: skip re-download if today's results already exist ----
+    if not args.tickers and not args.force_download:
+        from datetime import date as _today_date
+        today_str = _today_date.today().strftime("%Y%m%d")
+        existing_csv = OUTPUT_DIR / f"{market_label}_{today_str}_AllResults.csv"
+        existing_parquet = OUTPUT_DIR / f"{market_label}_{today_str}_AllResults.parquet"
+        if existing_csv.exists() or existing_parquet.exists():
+            logger.info("今日 %s 市场已分析完成（%s），跳过重新下载与分析。", market_label, existing_csv.name if existing_csv.exists() else existing_parquet.name)
+            logger.info("如需强制重新扫描，请使用 --force-download 参数。")
+            # Load results from parquet for terminal report
+            if existing_parquet.exists():
+                try:
+                    import pandas as pd
+                    from scanner import ScanResult, ScoreBreakdown
+                    import numpy as np
+                    df = pd.read_parquet(existing_parquet)
+                    results: list[ScanResult] = []
+                    for _, row in df.iterrows():
+                        sr = ScanResult(
+                            ticker=str(row.get("Ticker", "")),
+                            market=str(row.get("Market", market_label)),
+                            name=str(row.get("Name", "")),
+                            sector=str(row.get("Sector", "")),
+                            industry=str(row.get("Industry", "")),
+                            is_etf=bool(row.get("IsETF", False)),
+                            close=float(row.get("Close", 0)),
+                            score=ScoreBreakdown(
+                                total=float(row.get("Score", 0)),
+                                trend=float(row.get("TrendScore", 0)),
+                                volume=float(row.get("VolumeScore", 0)),
+                                accumulation=float(row.get("AccumulationScore", 0)),
+                                volatility=float(row.get("CompressionScore", 0)),
+                                structure=float(row.get("StructureScore", 0)),
+                            ),
+                            obv=row.get("OBV", np.nan),
+                            cmf=row.get("CMF", np.nan),
+                            ad=row.get("AD", np.nan),
+                            atr14=row.get("ATR14", np.nan),
+                            rsi14=row.get("RSI14", np.nan),
+                            dist_to_low_52w=row.get("DistToLow52W", np.nan),
+                            wyckoff_phase=str(row.get("WyckoffPhase", "Unknown")),
+                            volume_accum_days=int(row.get("VolAccumDays", 0)),
+                            passed_filters=bool(row.get("PassedFilters", False)),
+                            style=str(row.get("Style", "均衡")),
+                        )
+                        results.append(sr)
+                    print_terminal_report(results, n=args.top)
+                    total = len(results)
+                    passed = sum(1 for r in results if r.passed_filters)
+                    from dataclasses import dataclass, field
+                    from datetime import datetime
+                    from scanner import ScanReport
+                    report = ScanReport(
+                        results=results,
+                        total_tickers=total,
+                        successful=total,
+                        passed_filters=passed,
+                    )
+                    print_scan_summary(report)
+                except Exception as exc:
+                    logger.warning("加载已有结果失败，将重新扫描: %s", exc)
+                else:
+                    return 0
+
     # Build universe or use specific tickers
     if args.tickers:
         symbols = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
@@ -125,8 +197,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if not include_a_shares and include_us:
             logger.info("Building US stock universe only...")
             stock_universe, etf_universe = build_ticker_universe(
-                include_stocks=include_stocks,
-                include_etfs=include_etfs,
+                include_stocks=False,
+                include_etfs=False,
                 include_us=True,
             )
         elif include_stocks or include_etfs:
@@ -153,6 +225,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         resume=not args.no_resume,
         data_source=args.data_source,
         include_us=include_us,
+        market=market_label,
     )
 
     if report.successful == 0:
@@ -165,6 +238,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         report.results,
         top_n_csv=args.top,
         top_n_parquet=args.top_parquet,
+        market=market_label,
     )
 
     # Terminal report
@@ -252,6 +326,11 @@ def cmd_clean(args: argparse.Namespace) -> int:
             shutil.rmtree(d)
             d.mkdir(parents=True, exist_ok=True)
             logger.info("Cleared: %s", d)
+
+    # Recreate cache subdirectories if cache was cleaned
+    if CACHE_DIR in dirs or not args.output_only:
+        for sub in ("a_share", "us"):
+            (CACHE_DIR / sub).mkdir(parents=True, exist_ok=True)
 
     clear_checkpoint()
     logger.info("Checkpoint cleared.")

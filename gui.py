@@ -6,12 +6,15 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from datetime import date
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
 MAIN_FILE = PROJECT_ROOT / "main.py"
+from report import market_output_filename, resolve_latest_file
+
 COLUMN_NAMES = {
     "Ticker": "代码", "Name": "名称", "Sector": "板块", "Industry": "行业", "IsETF": "ETF", "Style": "风格", "Quality": "质量",
     "Close": "收盘价", "Score": "综合评分", "TrendScore": "趋势分", "VolumeScore": "成交量分",
@@ -26,7 +29,7 @@ COLUMN_NAMES = {
 class ScannerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("A股机构吸筹扫描器")
+        self.root.title("机构吸筹扫描器")
         self.root.geometry("1440x900")
         self.root.minsize(1100, 650)
         self.process: subprocess.Popen[str] | None = None
@@ -42,13 +45,23 @@ class ScannerGUI:
         self.data_source = tk.StringVar(value="eastmoney")
         self.data_source_label = tk.StringVar(value="当前：东方财富")
         self.status = tk.StringVar(value="就绪")
+        self.current_file = ""
+        self.current_market = "a_share"
+        self._today = date.today().strftime("%Y%m%d")
         self._configure_style()
         self._build_ui()
-        self.search.trace_add("write", lambda *_: self.load_csv(getattr(self, "current_file", "Top50.csv")))
-        self.sector_filter.trace_add("write", lambda *_: self.load_csv(getattr(self, "current_file", "Top50.csv")))
-        self.industry_filter.trace_add("write", lambda *_: self.load_csv(getattr(self, "current_file", "Top50.csv")))
-        self.quality_filter.trace_add("write", lambda *_: self.load_csv(getattr(self, "current_file", "Top50.csv")))
-        self.load_csv("Top50.csv")
+        self.search.trace_add("write", lambda *_: self.load_csv())
+        self.sector_filter.trace_add("write", lambda *_: self.load_csv())
+        self.industry_filter.trace_add("write", lambda *_: self.load_csv())
+        self.quality_filter.trace_add("write", lambda *_: self.load_csv())
+        # Auto-load today's results if available
+        initial = market_output_filename("Top50.csv", self.current_market)
+        if not (OUTPUT_DIR / initial).exists():
+            initial = market_output_filename("AllResults.csv", self.current_market)
+        if (OUTPUT_DIR / initial).exists():
+            self.load_csv(initial)
+        else:
+            self.load_csv()
 
     def _configure_style(self) -> None:
         style = ttk.Style()
@@ -65,7 +78,7 @@ class ScannerGUI:
     def _build_ui(self) -> None:
         header = ttk.Frame(self.root, style="Header.TFrame", padding=(24, 18))
         header.pack(fill=tk.X)
-        ttk.Label(header, text="A股机构吸筹扫描器", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(header, text="机构吸筹扫描器", style="Title.TLabel").pack(anchor=tk.W)
         ttk.Label(header, text="全市场股票与ETF · 技术指标 · 评分筛选", style="Sub.TLabel").pack(anchor=tk.W, pady=(4, 0))
 
         controls = ttk.LabelFrame(self.root, text="扫描设置", padding=12)
@@ -95,8 +108,8 @@ class ScannerGUI:
 
         toolbar = ttk.Frame(self.root, padding=(18, 2))
         toolbar.pack(fill=tk.X)
-        ttk.Button(toolbar, text="查看Top50", command=lambda: self.load_csv("Top50.csv")).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="查看全部结果", command=lambda: self.load_csv("AllResults.csv")).pack(side=tk.LEFT, padx=6)
+        ttk.Button(toolbar, text="查看Top50", command=lambda: self.load_csv(market_output_filename("Top50.csv", self.current_market))).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(toolbar, text="查看全部结果", command=lambda: self.load_csv(market_output_filename("AllResults.csv", self.current_market))).pack(side=tk.LEFT, padx=6)
         ttk.Button(toolbar, text="打开结果目录", command=self.open_output).pack(side=tk.LEFT, padx=6)
         ttk.Label(toolbar, text="板块", padding=(16, 0, 4, 0)).pack(side=tk.LEFT)
         self.sector_box = ttk.Combobox(toolbar, textvariable=self.sector_filter, state="readonly", width=12)
@@ -159,6 +172,8 @@ class ScannerGUI:
         self.clear_log()
         self.start_button.configure(state=tk.DISABLED)
         self.progress.start(12)
+        self.current_market = self.market.get()
+        self._today = date.today().strftime("%Y%m%d")
         command = self.build_command()
         self.append_log("执行：" + " ".join(command) + "\n")
         threading.Thread(target=self.run_process, args=(command,), daemon=True).start()
@@ -181,7 +196,10 @@ class ScannerGUI:
         self.progress.stop()
         self.start_button.configure(state=tk.NORMAL)
         self.status.set("扫描完成" if code == 0 else f"扫描结束，退出码：{code}")
-        self.load_csv("Top50.csv" if (OUTPUT_DIR / "Top50.csv").exists() else "AllResults.csv")
+        top_name = market_output_filename("Top50.csv", self.current_market)
+        if not (OUTPUT_DIR / top_name).exists():
+            top_name = market_output_filename("AllResults.csv", self.current_market)
+        self.load_csv(top_name)
 
     def scan_failed(self, error: str) -> None:
         self.progress.stop()
@@ -205,7 +223,8 @@ class ScannerGUI:
 
     def _market_changed(self, _event=None) -> None:
         labels = {"a_share": "A股（沪深京）", "us": "美股（NYSE/NASDAQ）", "all": "A股 + 美股"}
-        market = self.market.get()
+        self.current_market = self.market.get()
+        market = self.current_market
         self.market_label.config(text=labels[market])
         self.status.set(f"已切换市场：{labels[market]}")
         if market == "us":
@@ -235,7 +254,7 @@ class ScannerGUI:
 
     def _sector_changed(self, _event=None) -> None:
         self.industry_filter.set("全部行业")
-        self.load_csv(self.current_file)
+        self.load_csv()
 
     def _update_filter_values(self, headers: list[str], rows: list[list[str]]) -> None:
         def values_for(column: str) -> list[str]:
@@ -272,7 +291,11 @@ class ScannerGUI:
             and (self.quality_filter.get() == "全部质量" or data.get("Quality") == self.quality_filter.get())
         )
 
-    def load_csv(self, filename: str) -> None:
+    def load_csv(self, filename: str | None = None) -> None:
+        if filename is None:
+            filename = self.current_file
+        if not filename:
+            return
         path = OUTPUT_DIR / filename
         self.current_file = filename
         if not path.exists():
@@ -300,7 +323,15 @@ class ScannerGUI:
             messagebox.showerror("读取失败", str(exc))
 
     def open_output(self) -> None:
-        if OUTPUT_DIR.exists(): subprocess.Popen(["explorer", str(OUTPUT_DIR)])
+        if not OUTPUT_DIR.exists():
+            return
+        if sys.platform == "darwin":
+            opener = "open"
+        elif sys.platform.startswith("win"):
+            opener = "explorer"
+        else:
+            opener = "xdg-open"
+        subprocess.Popen([opener, str(OUTPUT_DIR)])
 
 
 def main() -> None:

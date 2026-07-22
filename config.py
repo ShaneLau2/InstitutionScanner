@@ -24,6 +24,10 @@ LOG_DIR: Final[Path] = BASE_DIR / "logs"
 for _d in (CACHE_DIR, OUTPUT_DIR, LOG_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
+# Cache subdirectories per market
+for _sub in ("a_share", "us"):
+    (CACHE_DIR / _sub).mkdir(parents=True, exist_ok=True)
+
 
 # ======================================================================
 # Ticker & Market Filters

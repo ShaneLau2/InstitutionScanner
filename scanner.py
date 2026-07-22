@@ -98,15 +98,18 @@ class ScanResult:
 # Checkpointing
 # ======================================================================
 
-_CHECKPOINT_PATH = OUTPUT_DIR / "_checkpoint.json"
+
+def _checkpoint_path(market: str = "a_share") -> Path:
+    """Path to the market-specific checkpoint file."""
+    return OUTPUT_DIR / f"_checkpoint_{market}.json"
 
 
 def _normalize_ticker(ticker: str) -> str:
     return str(ticker).strip().upper()
 
 
-def save_checkpoint(processed: set[str]) -> None:
-    """Save the set of already-processed tickers."""
+def save_checkpoint(processed: set[str], market: str = "a_share") -> None:
+    """Save the set of already-processed tickers for a specific market."""
     if not ENABLE_CHECKPOINT:
         return
     try:
@@ -114,24 +117,25 @@ def save_checkpoint(processed: set[str]) -> None:
             "processed": sorted(_normalize_ticker(ticker) for ticker in processed),
             "timestamp": datetime.now().isoformat(),
         }
-        _CHECKPOINT_PATH.write_text(json.dumps(data))
+        _checkpoint_path(market).write_text(json.dumps(data))
     except Exception as exc:
         logger.warning("Failed to save checkpoint: %s", exc)
 
 
-def load_checkpoint() -> set[str]:
-    """Load previously-processed tickers from checkpoint."""
-    if not _CHECKPOINT_PATH.exists():
+def load_checkpoint(market: str = "a_share") -> set[str]:
+    """Load previously-processed tickers for a specific market."""
+    path = _checkpoint_path(market)
+    if not path.exists():
         return set()
     try:
-        data = json.loads(_CHECKPOINT_PATH.read_text())
+        data = json.loads(path.read_text())
         return {_normalize_ticker(ticker) for ticker in data.get("processed", [])}
     except Exception:
         return set()
 
 
-def _load_previous_tickers() -> set[str]:
-    prev_parquet = OUTPUT_DIR / "AllResults.parquet"
+def _load_previous_tickers(market: str = "a_share") -> set[str]:
+    prev_parquet = _find_latest_parquet(market)
     if not prev_parquet.exists():
         return set()
     try:
@@ -141,10 +145,31 @@ def _load_previous_tickers() -> set[str]:
         return set()
 
 
-def clear_checkpoint() -> None:
-    """Remove the checkpoint file."""
-    if _CHECKPOINT_PATH.exists():
-        _CHECKPOINT_PATH.unlink(missing_ok=True)
+def _find_latest_parquet(market: str = "a_share") -> Path:
+    """Find the most recent AllResults parquet for the given market."""
+    from datetime import date as _date
+    today = _date.today().strftime("%Y%m%d")
+    prefixed = OUTPUT_DIR / f"{market}_{today}_AllResults.parquet"
+    if prefixed.exists():
+        return prefixed
+    legacy = OUTPUT_DIR / "AllResults.parquet"
+    if legacy.exists():
+        return legacy
+    return prefixed  # caller handles non-existence
+
+
+def clear_checkpoint(market: str | None = None) -> None:
+    """Remove checkpoint file(s). If market is None, removes all."""
+    if market is not None:
+        path = _checkpoint_path(market)
+        if path.exists():
+            path.unlink(missing_ok=True)
+    else:
+        for f in OUTPUT_DIR.glob("_checkpoint_*.json"):
+            f.unlink(missing_ok=True)
+        legacy = OUTPUT_DIR / "_checkpoint.json"
+        if legacy.exists():
+            legacy.unlink(missing_ok=True)
 
 
 # ======================================================================
@@ -332,6 +357,7 @@ def run_scan(
     resume: bool = True,
     data_source: str = "eastmoney",
     include_us: bool = False,
+    market: str = "a_share",
 ) -> ScanReport:
     """
     Two-phase parallel scan across the entire ticker universe.
@@ -392,8 +418,8 @@ def run_scan(
     downloaded = download_batch(all_tickers, desc="Downloading", force=force_download, source=data_source)
 
     # ---- Phase 2: Parallel analyse ----
-    processed_set = load_checkpoint() if resume else set()
-    previous_tickers = _load_previous_tickers() if resume else set()
+    processed_set = load_checkpoint(market) if resume else set()
+    previous_tickers = _load_previous_tickers(market) if resume else set()
     processed_set.intersection_update(previous_tickers)
     processed_set.difference_update({_normalize_ticker(ticker) for ticker in downloaded})
 
@@ -404,11 +430,19 @@ def run_scan(
         if ti.ticker in processed_set:
             continue
         safe = ti.ticker.replace("/", "_").replace("\\", "_")
-        # Match download_ticker's cache naming: {ticker}__us or {ticker}__eastmoney
-        paths_to_try = [
-            CACHE_DIR / f"{safe}__us.csv" if ti.market == "us" else CACHE_DIR / f"{safe}__eastmoney.csv",
-            CACHE_DIR / f"{safe}.csv",
-        ]
+        # Match download_ticker's cache naming: subdirectory per market
+        if ti.market == "us":
+            paths_to_try = [
+                CACHE_DIR / "us" / f"{safe}.csv",
+                CACHE_DIR / f"{safe}__us.csv",
+                CACHE_DIR / f"{safe}.csv",
+            ]
+        else:
+            paths_to_try = [
+                CACHE_DIR / "a_share" / f"{safe}.csv",
+                CACHE_DIR / f"{safe}__eastmoney.csv",
+                CACHE_DIR / f"{safe}.csv",
+            ]
         if any(p.exists() for p in paths_to_try):
             analyse_queue.append(ti)
         else:
@@ -428,7 +462,7 @@ def run_scan(
     passed: int = 0
 
     # Also include previously-processed results from the last run's parquet
-    prev_parquet = OUTPUT_DIR / "AllResults.parquet"
+    prev_parquet = _find_latest_parquet(market)
     prev_results: dict[str, ScanResult] = {}
     universe_symbols = {_normalize_ticker(ti.ticker) for ti in all_tickers}
     if resume and prev_parquet.exists():
@@ -515,7 +549,7 @@ def run_scan(
 
             # Checkpoint every N tickers
             if len(processed_set) % CHECKPOINT_INTERVAL == 0:
-                save_checkpoint(processed_set)
+                save_checkpoint(processed_set, market)
 
     # Merge previous results for tickers we didn't re-analyse
     for ticker, sr in prev_results.items():
@@ -526,7 +560,7 @@ def run_scan(
                 passed += 1
 
     # Final checkpoint
-    save_checkpoint(processed_set)
+    save_checkpoint(processed_set, market)
 
     # Sort by score descending
     results.sort(key=lambda r: r.score.total, reverse=True)

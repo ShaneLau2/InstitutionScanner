@@ -23,3 +23,6 @@ matplotlib>=3.7.0
 
 # US stock data
 yfinance>=0.2.0
+
+# HTML table parsing (for S&P 500 / NASDAQ 100 component lists from Wikipedia)
+lxml>=4.9.0
