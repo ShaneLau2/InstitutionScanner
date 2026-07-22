@@ -33,6 +33,8 @@ from config import (
     CMF_PERIOD,
     DONCHIAN_PERIOD,
     EMA_PERIODS,
+    ENABLE_ADVANCED_INDICATORS,
+    ENABLE_VOLUME_PROFILE,
     HV_PERIODS,
     MACD_FAST,
     MACD_SIGNAL,
@@ -71,48 +73,106 @@ def _to_float_array(series: pd.Series) -> np.ndarray:
 
 
 def _rolling_slope(series: pd.Series, window: int) -> pd.Series:
-    """Rolling linear regression slope over right-aligned windows."""
+    """
+    Rolling linear regression slope over right-aligned windows.
+
+    Vectorized O(n) implementation using cumulative sums.
+    For relative positions x = [0, 1, ..., n-1]:
+      slope = (Σ(x*y) - n·x̄·ȳ) / Σ((x-x̄)²)
+    """
+    y = series.astype(np.float64)
     n = window
-    x = np.arange(n, dtype=np.float64)
-    result = np.full(len(series), np.nan, dtype=np.float64)
+    length = len(y)
+
+    if length < n:
+        return pd.Series(np.full(length, np.nan), index=series.index)
+
+    # Precompute constants for x = [0, 1, ..., n-1]
+    x_mean = (n - 1) / 2.0
+    denom = n * (n - 1) * (n + 1) / 12.0  # Σ((x-x̄)²)
     min_periods = max(2, n // 2)
-    y = _to_float_array(series)
-    for end in range(n - 1, len(y)):
-        window_y = y[end - n + 1:end + 1]
-        valid = np.isfinite(window_y)
-        if valid.sum() < min_periods:
-            continue
-        x_valid = x[valid]
-        y_valid = window_y[valid]
-        x_centered = x_valid - x_valid.mean()
-        denom = np.dot(x_centered, x_centered)
-        if denom > 0:
-            result[end] = np.dot(x_centered, y_valid - y_valid.mean()) / denom
-    return pd.Series(result, index=series.index)
+
+    # Fill NaN for cumsum, but track actual valid count
+    y_filled = y.fillna(0)
+    idx = np.arange(length)
+
+    # Cumulative sums
+    cum_y = y_filled.cumsum()
+    cum_jy = (y_filled * idx).cumsum()
+
+    # Rolling sums via cumulative difference
+    prev_cum_y = cum_y.shift(n).fillna(0)
+    prev_cum_jy = cum_jy.shift(n).fillna(0)
+
+    sum_y = cum_y - prev_cum_y            # Σ(y) in window
+    sum_jy = cum_jy - prev_cum_jy          # Σ(j·y[j]) with absolute j
+    start_idx = pd.Series(idx - n + 1, index=y.index)
+    sum_rel_y = sum_jy - start_idx * sum_y  # Σ(x_rel·y) with relative x
+
+    y_mean = sum_y / n
+    slope = (sum_rel_y - n * x_mean * y_mean) / denom
+
+    # Apply min_periods
+    valid_count = y.rolling(n, min_periods=1).count()
+    slope[valid_count < min_periods] = np.nan
+    slope.iloc[:n - 1] = np.nan
+
+    return slope
 
 
 def _rolling_r2(series: pd.Series, window: int) -> pd.Series:
-    """Rolling R² over right-aligned windows."""
+    """
+    Rolling R² over right-aligned windows.
+
+    Vectorized O(n) — shares cumsum with _rolling_slope.
+    r² = (Σ((x-x̄)(y-ȳ)))² / (Σ((x-x̄)²) · Σ((y-ȳ)²))
+    """
+    y = series.astype(np.float64)
     n = window
-    x = np.arange(n, dtype=np.float64)
-    result = np.full(len(series), np.nan, dtype=np.float64)
+    length = len(y)
+
+    if length < n:
+        return pd.Series(np.full(length, np.nan), index=series.index)
+
+    # Precompute constants
+    x_mean = (n - 1) / 2.0
+    denom_x = n * (n - 1) * (n + 1) / 12.0  # Σ((x-x̄)²)
     min_periods = max(2, n // 2)
-    y = _to_float_array(series)
-    for end in range(n - 1, len(y)):
-        window_y = y[end - n + 1:end + 1]
-        valid = np.isfinite(window_y)
-        if valid.sum() < min_periods:
-            continue
-        x_valid = x[valid]
-        y_valid = window_y[valid]
-        x_centered = x_valid - x_valid.mean()
-        y_centered = y_valid - y_valid.mean()
-        denom_x = np.dot(x_centered, x_centered)
-        denom_y = np.dot(y_centered, y_centered)
-        if denom_x > 0 and denom_y > 0:
-            correlation = np.dot(x_centered, y_centered) / np.sqrt(denom_x * denom_y)
-            result[end] = correlation * correlation
-    return pd.Series(result, index=series.index)
+
+    y_filled = y.fillna(0)
+    idx = np.arange(length)
+
+    # Three cumulative sums: y, j·y, y²
+    cum_y = y_filled.cumsum()
+    cum_jy = (y_filled * idx).cumsum()
+    cum_y2 = (y_filled ** 2).cumsum()
+
+    prev_cum_y = cum_y.shift(n).fillna(0)
+    prev_cum_jy = cum_jy.shift(n).fillna(0)
+    prev_cum_y2 = cum_y2.shift(n).fillna(0)
+
+    sum_y = cum_y - prev_cum_y
+    sum_jy = cum_jy - prev_cum_jy
+    sum_y2 = cum_y2 - prev_cum_y2
+
+    start_idx = pd.Series(idx - n + 1, index=y.index)
+    sum_rel_y = sum_jy - start_idx * sum_y  # Σ(x_rel·y)
+
+    y_mean = sum_y / n
+    numerator = sum_rel_y - n * x_mean * y_mean  # Σ((x-x̄)(y-ȳ))
+
+    y_var = sum_y2 - sum_y * y_mean  # Σ((y-ȳ)²)
+
+    result = pd.Series(np.full(length, np.nan), index=y.index)
+    mask = (denom_x > 0) & (y_var > 0)
+    result[mask] = (numerator[mask] ** 2) / (denom_x * y_var[mask])
+
+    # Apply min_periods
+    valid_count = y.rolling(n, min_periods=1).count()
+    result[valid_count < min_periods] = np.nan
+    result.iloc[:n - 1] = np.nan
+
+    return result
 
 
 # ======================================================================
@@ -138,6 +198,7 @@ def compute_atr(df: pd.DataFrame) -> None:
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
     true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["_TR"] = true_range  # cached for compute_adx
     for period in ATR_PERIODS:
         df[f"ATR{period}"] = true_range.rolling(window=period, min_periods=period // 2).mean()
 
@@ -153,7 +214,11 @@ def compute_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> None:
     cond_minus = (down_move > up_move) & (down_move > 0)
     plus_dm[cond_plus] = up_move[cond_plus]
     minus_dm[cond_minus] = down_move[cond_minus]
-    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    # Use cached true_range from compute_atr if available
+    if "_TR" in df.columns:
+        tr = df["_TR"]
+    else:
+        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     atr_val = tr.rolling(window=period, min_periods=period // 2).mean()
     plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period // 2).mean() / atr_val)
     minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period // 2).mean() / atr_val)
@@ -166,13 +231,20 @@ def compute_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> None:
 def compute_cci(df: pd.DataFrame, period: int = CCI_PERIOD) -> None:
     tp = (df["High"] + df["Low"] + df["Close"]) / 3
     sma_tp = tp.rolling(window=period, min_periods=period // 2).mean()
-    mad = tp.rolling(window=period, min_periods=period // 2).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    df["CCI"] = (tp - sma_tp) / (0.015 * mad)
+    # Vectorized MAD using numpy sliding_window_view (no Python lambda)
+    arr = tp.values.astype(np.float64)
+    n = period
+    mad = np.full(len(arr), np.nan, dtype=np.float64)
+    if len(arr) >= n:
+        windows = np.lib.stride_tricks.sliding_window_view(arr, n)
+        w_means = windows.mean(axis=1, keepdims=True)
+        mad[n - 1:] = np.mean(np.abs(windows - w_means), axis=1)
+    df["CCI"] = (tp - sma_tp) / (0.015 * pd.Series(mad, index=df.index))
 
 
 def compute_roc(df: pd.DataFrame, period: int = ROC_PERIOD) -> None:
     close = df["Close"]
-    df["ROC"] = ((close - close.shift(period)) / close.shift(period).replace(0, np.nan)) * 100
+    df[f"ROC{period}"] = ((close - close.shift(period)) / close.shift(period).replace(0, np.nan)) * 100
 
 
 def compute_52week_levels(df: pd.DataFrame) -> None:
@@ -391,21 +463,26 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = VOLUME_PROFILE_BINS, lo
         df["VP_HVN_Center"] = price_min
         df["DistToHVN_Pct"] = 0.0
         return
+
     bin_edges = np.linspace(price_min, price_max, bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    profile = np.zeros(bins)
-    for i in range(len(subset)):
-        row_low, row_high = low.iloc[i], high.iloc[i]
-        if row_low >= row_high:
-            continue
-        row_vol = vol.iloc[i]
-        bin_indices = np.digitize([row_low, row_high], bin_edges) - 1
-        lo_idx = max(0, min(bin_indices[0], bins - 1))
-        hi_idx = max(0, min(bin_indices[1], bins - 1))
-        if hi_idx <= lo_idx:
-            hi_idx = min(lo_idx + 1, bins - 1)
-        for b in range(lo_idx, hi_idx + 1):
-            profile[b] += row_vol / (hi_idx - lo_idx + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2  # (bins,)
+
+    # Determine which bins each row spans — fully vectorized
+    lo_idx = np.clip(np.digitize(low.values, bin_edges) - 1, 0, bins - 1)
+    hi_idx = np.clip(np.digitize(high.values, bin_edges) - 1, 0, bins - 1)
+    hi_idx = np.maximum(hi_idx, lo_idx)  # ensure at least 1 bin per row
+    n_spanned = hi_idx - lo_idx + 1      # (lookback,)
+
+    # Build coverage mask via broadcasting: (lookback, bins)
+    cover_mask = (
+        (low.values[:, None] <= bin_centers[None, :]) &
+        (high.values[:, None] >= bin_centers[None, :])
+    )
+
+    # Weight per row: volume divided evenly across spanned bins
+    weights = vol.values.astype(np.float64) / n_spanned.astype(np.float64)
+    profile = (cover_mask * weights[:, None]).sum(axis=0)  # (bins,)
+
     if profile.sum() == 0:
         return
     threshold_hvn = np.percentile(profile[profile > 0], 67) if (profile > 0).any() else 0
@@ -441,8 +518,13 @@ def detect_wyckoff_phase(df: pd.DataFrame) -> None:
         df["WyckoffPhase"] = "Unknown"
         return
     price_now = close.iloc[-1]
-    ma200 = close.rolling(200, min_periods=100).mean().iloc[-1]
-    ma200_series = close.rolling(200, min_periods=100).mean()
+    # Reuse MA200 from compute_moving_averages if available
+    if "MA200" in df.columns:
+        ma200 = df["MA200"].iloc[-1]
+        ma200_series = df["MA200"]
+    else:
+        ma200 = close.rolling(200, min_periods=100).mean().iloc[-1]
+        ma200_series = close.rolling(200, min_periods=100).mean()
     ma200_slope = _rolling_slope(ma200_series, 60).iloc[-1]
     vol_ma20 = vol.rolling(20, min_periods=10).mean().iloc[-1]
     vol_ma60 = vol.rolling(60, min_periods=30).mean().iloc[-1]
@@ -530,18 +612,22 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     compute_ad_slope(df)
     compute_cmf(df)
     compute_mfi(df)
-    compute_vwap(df)
+    if ENABLE_ADVANCED_INDICATORS:
+        compute_vwap(df)
+        compute_cci(df)
+        compute_donchian(df)
+        compute_volume_ratios(df)
     compute_regression(df)
     compute_macd(df)
     compute_rsi(df)
     compute_historical_volatility(df)
     compute_atr_compression(df)
     compute_bollinger_bands(df)
-    compute_donchian(df)
-    try:
-        compute_volume_profile(df)
-    except Exception:
-        logger.debug("Volume Profile failed — skipping.", exc_info=True)
+    if ENABLE_VOLUME_PROFILE:
+        try:
+            compute_volume_profile(df)
+        except Exception:
+            logger.debug("Volume Profile failed — skipping.", exc_info=True)
     try:
         detect_wyckoff_phase(df)
     except Exception:

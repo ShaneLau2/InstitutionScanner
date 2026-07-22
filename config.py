@@ -66,20 +66,21 @@ class MarketConfig:
     excluded_keywords: tuple[str, ...] = ()
     bear_decline_pct: float = -20.0
     download_threads: int = 2
+    download_pause: float = 1.0
 
 
 A_SHARE_CONFIG: Final[MarketConfig] = MarketConfig(
     label="A股", currency="元", min_price=5.0, max_price=800.0,
     min_volume=200_000, min_market_cap=1e8,
     excluded_keywords=("债", "货币", "同业存单", "短融", "中票", "REIT", "浙商沪"),
-    bear_decline_pct=-20.0, download_threads=2,
+    bear_decline_pct=-20.0, download_threads=2, download_pause=1.0,
 )
 
 US_STOCK_CONFIG: Final[MarketConfig] = MarketConfig(
     label="美股", currency="USD", min_price=5.0, max_price=5000.0,
     min_volume=200_000, min_market_cap=1e8,
     excluded_keywords=(),
-    bear_decline_pct=-30.0, download_threads=2,
+    bear_decline_pct=-30.0, download_threads=6, download_pause=0.2,
 )
 
 # Shortcut for backward compatibility
@@ -204,5 +205,13 @@ ENABLE_CHECKPOINT: bool = True
 # ETF Fund Flows (optional, requires a free source)
 ENABLE_FUND_FLOWS: bool = True
 
-# Volume Profile in scoring
+# Volume Profile in scoring (expensive — ~8% CPU for 2 pts max)
 ENABLE_VOLUME_PROFILE: bool = True
+
+# Truncate data to this many bars before indicator computation.
+# All current indicators (MA200, 52-week, etc.) use ≤252 bars.
+# Setting lower = faster analysis (default 600 = ~2.5 years).
+MAX_INDICATOR_BARS: int = 600
+
+# Advanced indicators (CCI, Donchian, VWAP, Volume Ratios — not used by scoring)
+ENABLE_ADVANCED_INDICATORS: bool = True

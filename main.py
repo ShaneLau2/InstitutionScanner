@@ -42,6 +42,7 @@ from downloader import (
     build_ticker_universe,
     download_batch,
     download_ticker,
+    prefilter_by_market_cap,
 )
 from scanner import (
     ScanReport,
@@ -216,6 +217,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             len(stock_universe), len(etf_universe),
             len(stock_universe) + len(etf_universe),
         )
+
+        # Pre-filter: skip tickers whose known market cap is below threshold
+        stock_universe = prefilter_by_market_cap(stock_universe, market_label)
 
     # Run the scan
     report = run_scan(

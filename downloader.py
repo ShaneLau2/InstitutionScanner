@@ -631,28 +631,56 @@ def build_ticker_universe(
     return stock_list, etf_list
 
 
+def prefilter_by_market_cap(
+    tickers: list[TickerInfo],
+    market: str = "a_share",
+) -> list[TickerInfo]:
+    """
+    Remove tickers whose known market cap is below the market minimum.
+
+    Only filters tickers where market_cap is already known (e.g. A-shares
+    from Eastmoney API). Tickers with unknown market_cap (e.g. US stocks
+    from NASDAQ list) pass through.
+    """
+    cfg = MARKET_CONFIGS.get(market)
+    if not cfg:
+        return tickers
+    result: list[TickerInfo] = []
+    skipped = 0
+    for ti in tickers:
+        if ti.market_cap is not None and ti.market_cap < cfg.min_market_cap:
+            skipped += 1
+            continue
+        result.append(ti)
+    if skipped:
+        logger.info("Pre-filter removed %d tickers below min_market_cap=%.0e (%s).",
+                     skipped, cfg.min_market_cap, market)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Data cache helpers
 # ---------------------------------------------------------------------------
 
 def _cache_path(ticker: str) -> Path:
-    """File path for a ticker's cached CSV.
+    """File path for a ticker's cached Parquet.
 
     Uses subdirectories per market: cache/a_share/ and cache/us/.
     The cache key format is {ticker}__{source} (A-shares) or {ticker}__us (US).
+    Extension is .parquet for fast I/O.
     """
     safe = ticker.replace("/", "_").replace("\\", "_")
     if safe.endswith("__us"):
         clean = safe[:-4]  # strip __us suffix
-        return CACHE_DIR / "us" / f"{clean}.csv"
+        return CACHE_DIR / "us" / f"{clean}.parquet"
     else:
         # A-share: strip source suffix (__eastmoney, __sina, __tencent)
         for src in ("__eastmoney", "__sina", "__tencent"):
             if safe.endswith(src):
                 clean = safe[:-len(src)]
-                return CACHE_DIR / "a_share" / f"{clean}.csv"
+                return CACHE_DIR / "a_share" / f"{clean}.parquet"
         # Fallback: keep original key in a_share (e.g. legacy ticker without suffix)
-        return CACHE_DIR / "a_share" / f"{safe}.csv"
+        return CACHE_DIR / "a_share" / f"{safe}.parquet"
 
 
 def _legacy_cache_path(ticker: str) -> Path:
@@ -661,30 +689,48 @@ def _legacy_cache_path(ticker: str) -> Path:
     return CACHE_DIR / f"{safe}.csv"
 
 
+def _csv_cache_path(ticker: str) -> Path:
+    """CSV path in the new subdirectory layout — for migration."""
+    return _cache_path(ticker).with_suffix(".csv")
+
+
 def _load_cache(ticker: str) -> pd.DataFrame | None:
     """Load cached OHLCV data for a ticker, or None if not found / corrupted.
 
-    Checks the market-subdirectory path first; falls back to legacy flat
-    path and migrates data if found.
+    Checks Parquet first; falls back to CSV (subdir or legacy flat) and
+    migrates to Parquet on access.
     """
     path = _cache_path(ticker)
-    if not path.exists():
-        # Try legacy flat path for backward compat
-        legacy = _legacy_cache_path(ticker)
-        if not legacy.exists():
-            return None
-        # Migrate: copy from legacy to new path
-        try:
-            legacy.parent.mkdir(parents=True, exist_ok=True)
-            legacy.replace(path)
-            logger.debug("Migrated cache %s → %s", legacy.name, path)
-        except Exception:
-            path = legacy  # fall back to legacy path
+    if path.exists():
+        return _read_parquet_cache(path, ticker)
+
+    # Try CSV in the same subdirectory (old format before Parquet migration)
+    csv_path = _csv_cache_path(ticker)
+    if csv_path.exists():
+        df = _read_csv_cache(csv_path, ticker)
+        if df is not None:
+            _migrate_to_parquet(path, df, ticker)
+        return df
+
+    # Try legacy flat CSV path (oldest format)
+    legacy = _legacy_cache_path(ticker)
+    if legacy.exists():
+        df = _read_csv_cache(legacy, ticker)
+        if df is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(path)
+            logger.debug("Migrated legacy cache %s → %s", legacy.name, path)
+        return df
+
+    return None
+
+
+def _read_parquet_cache(path: Path, ticker: str) -> pd.DataFrame | None:
+    """Read a Parquet cache file, returning None on corruption."""
     try:
-        df = pd.read_csv(path, index_col=0, parse_dates=True)
+        df = pd.read_parquet(path)
         if df.empty:
             return None
-        # Ensure required columns
         for col in ("Open", "High", "Low", "Close", "Volume"):
             if col not in df.columns:
                 logger.warning("Cache for %s missing column %s — ignoring.", ticker, col)
@@ -695,11 +741,40 @@ def _load_cache(ticker: str) -> pd.DataFrame | None:
         return None
 
 
+def _read_csv_cache(path: Path, ticker: str) -> pd.DataFrame | None:
+    """Read a CSV cache file, returning None on corruption."""
+    try:
+        df = pd.read_csv(path, index_col=0, parse_dates=True)
+        if df.empty:
+            return None
+        for col in ("Open", "High", "Low", "Close", "Volume"):
+            if col not in df.columns:
+                logger.warning("Cache for %s missing column %s — ignoring.", ticker, col)
+                return None
+        return df
+    except Exception:
+        logger.warning("Corrupted cache for %s — will re-download.", ticker)
+        return None
+
+
+def _migrate_to_parquet(target: Path, df: pd.DataFrame, ticker: str) -> None:
+    """Migrate a DataFrame to Parquet cache, removing the CSV source."""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(target)
+        csv_source = target.with_suffix(".csv")
+        if csv_source.exists():
+            csv_source.unlink()
+        logger.debug("Migrated cache %s → parquet", ticker)
+    except Exception:
+        pass  # non-critical; next read will retry
+
+
 def _save_cache(ticker: str, df: pd.DataFrame) -> None:
-    """Persist OHLCV data to CSV."""
+    """Persist OHLCV data to Parquet."""
     path = _cache_path(ticker)
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path)
+    df.to_parquet(path)
 
 
 # ---------------------------------------------------------------------------
@@ -1040,8 +1115,17 @@ def download_batch(
     # Build ticker->market map for routing downloads
     market_map = {t.ticker: t.market for t in tickers}
 
+    # Determine market-specific download settings
+    markets_present = {t.market for t in tickers}
+    if markets_present == {"us"}:
+        cfg = US_STOCK_CONFIG
+    else:
+        cfg = A_SHARE_CONFIG  # default / mixed: use conservative settings
+    pool_size = cfg.download_threads
+    pause = cfg.download_pause
+
     # Single-threaded download with inter-request pause
-    if DOWNLOAD_THREADS <= 1:
+    if pool_size <= 1:
         for sym in tqdm(symbols, desc=desc, unit="ticker"):
             try:
                 df = download_ticker(sym, force=force, source=source,
@@ -1052,9 +1136,9 @@ def download_batch(
                     skipped_delisted += 1
             except Exception:
                 skipped_delisted += 1
-            time.sleep(DOWNLOAD_RATE_LIMIT_PAUSE)
+            time.sleep(pause)
     else:
-        with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as pool:
+        with ThreadPoolExecutor(max_workers=pool_size) as pool:
             futures: dict[Any, str] = {
                 pool.submit(download_ticker, sym, force, source, market_map.get(sym, "a_share")): sym
                 for sym in symbols

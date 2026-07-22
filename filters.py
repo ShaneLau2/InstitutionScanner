@@ -27,6 +27,7 @@ from config import (
     CMF_THRESHOLD,
     CONSOLIDATION_DAYS,
     CONSOLIDATION_MAX_RANGE_PCT,
+    MARKET_CONFIGS,
     MIN_MARKET_CAP,
     MIN_PRICE,
     MAX_PRICE,
@@ -55,24 +56,24 @@ class FilterResult:
 # Basic sanity filters
 # ======================================================================
 
-def filter_min_price(df: pd.DataFrame) -> FilterResult:
+def filter_min_price(df: pd.DataFrame, min_price: float = MIN_PRICE, max_price: float = MAX_PRICE) -> FilterResult:
     """Reject if latest close is outside the configured price range."""
     close = df["Close"].iloc[-1]
-    passed = MIN_PRICE <= close <= MAX_PRICE
+    passed = min_price <= close <= max_price
     return FilterResult(
         passed=passed,
-        reason=f"收盘价 {close:.2f} 元，要求范围 {MIN_PRICE:.2f}-{MAX_PRICE:.2f} 元",
+        reason=f"收盘价 {close:.2f}，要求范围 {min_price:.2f}-{max_price:.2f}",
         details={"close": close},
     )
 
 
-def filter_min_volume(df: pd.DataFrame) -> FilterResult:
-    """Reject if average daily volume (60d) is below MIN_VOLUME."""
+def filter_min_volume(df: pd.DataFrame, min_volume: int = MIN_VOLUME) -> FilterResult:
+    """Reject if average daily volume (60d) is below min_volume."""
     vol_avg = df["Volume"].rolling(60, min_periods=30).mean().iloc[-1]
-    passed = vol_avg >= MIN_VOLUME
+    passed = vol_avg >= min_volume
     return FilterResult(
         passed=passed,
-        reason=f"AvgVol {vol_avg:,.0f} {'>=' if passed else '<'} MIN_VOLUME {MIN_VOLUME:,}",
+        reason=f"AvgVol {vol_avg:,.0f} {'>=' if passed else '<'} {min_volume:,}",
         details={"avg_volume_60": vol_avg},
     )
 
@@ -232,16 +233,7 @@ def filter_volume_accumulation(df: pd.DataFrame) -> FilterResult:
             },
         )
 
-    # Walk backwards to count consecutive True
-    consecutive = 0
-    for i in range(len(condition) - 1, -1, -1):
-        if condition.iloc[i]:
-            consecutive += 1
-        else:
-            break
-
-    passed = consecutive >= VOLUME_ACCUM_MIN_DAYS
-
+    # Build consecutive-count series (forward walk — also gives trailing count)
     volumes = condition.reset_index(drop=True)
     consecutive_series = pd.Series(0, index=condition.index, dtype=int)
     cnt = 0
@@ -251,18 +243,20 @@ def filter_volume_accumulation(df: pd.DataFrame) -> FilterResult:
         else:
             cnt = 0
         consecutive_series.iloc[i] = cnt
+    trailing_consecutive = int(consecutive_series.iloc[-1])
     max_consecutive = int(consecutive_series.max())
+    passed = trailing_consecutive >= VOLUME_ACCUM_MIN_DAYS
     df["_VolAccumDays"] = consecutive_series  # temporary column for scoring
 
     return FilterResult(
         passed=passed,
         reason=(
-            f"Volume accumulation: {consecutive} consecutive days "
+            f"Volume accumulation: {trailing_consecutive} consecutive days "
             f"(need {VOLUME_ACCUM_MIN_DAYS}), "
             f"peak {max_consecutive}"
         ),
         details={
-            "consecutive_days": consecutive,
+            "consecutive_days": trailing_consecutive,
             "max_consecutive": max_consecutive,
             "current_ratio": round(vol_ma20.iloc[-1] / vol_ma120.iloc[-1], 2) if vol_ma120.iloc[-1] > 0 else 0,
         },
@@ -437,20 +431,20 @@ def filter_volatility_contraction(df: pd.DataFrame) -> FilterResult:
 # Market Cap Filter
 # ======================================================================
 
-def filter_min_market_cap(market_cap: float | None, required: bool = True) -> FilterResult:
-    """Reject if market cap is below MIN_MARKET_CAP."""
+def filter_min_market_cap(market_cap: float | None, required: bool = True, min_market_cap: float = MIN_MARKET_CAP) -> FilterResult:
+    """Reject if market cap is below min_market_cap."""
     if market_cap is None:
         return FilterResult(
             passed=not required,
             reason="市值数据不可用" if required else "ETF不要求市值数据",
             details={"market_cap": None},
         )
-    passed = market_cap >= MIN_MARKET_CAP
+    passed = market_cap >= min_market_cap
     return FilterResult(
         passed=passed,
         reason=(
-            f"市值 {market_cap:,.0f} 元 "
-            f"{'>=' if passed else '<'} 最低市值 {MIN_MARKET_CAP:,.0f} 元"
+            f"市值 {market_cap:,.0f} "
+            f"{'>=' if passed else '<'} 最低市值 {min_market_cap:,.0f}"
         ),
         details={"market_cap": market_cap},
     )
@@ -525,16 +519,21 @@ def run_all_filters(
     df: pd.DataFrame,
     market_cap: float | None = None,
     require_market_cap: bool = True,
+    market: str = "a_share",
 ) -> AllFilterResults:
     """
     Run every filter against *df*.
 
+    Uses market-specific thresholds from MarketConfig when available.
+
     Returns an AllFilterResults struct — call .all_passed() for the go/no-go.
     """
+    cfg = MARKET_CONFIGS.get(market)
     return AllFilterResults(
-        min_price=filter_min_price(df),
-        min_volume=filter_min_volume(df),
-        min_market_cap=filter_min_market_cap(market_cap, required=require_market_cap),
+        min_price=filter_min_price(df, cfg.min_price, cfg.max_price) if cfg else filter_min_price(df),
+        min_volume=filter_min_volume(df, cfg.min_volume) if cfg else filter_min_volume(df),
+        min_market_cap=filter_min_market_cap(market_cap, required=require_market_cap,
+                                              min_market_cap=cfg.min_market_cap if cfg else MIN_MARKET_CAP),
         sufficient_history=filter_sufficient_history(df),
         bear_market=filter_bear_market(df),
         consolidation=filter_consolidation(df),

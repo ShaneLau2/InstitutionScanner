@@ -36,6 +36,7 @@ from config import (
     ENABLE_CHECKPOINT,
     LOG_DIR,
     MARKET_CONFIGS,
+    MAX_INDICATOR_BARS,
     MIN_MARKET_CAP,
     OUTPUT_DIR,
     SCAN_THREADS,
@@ -218,7 +219,7 @@ def scan_single_from_df(
                     asset_type=ticker_info.asset_type,
                     error=f"市值获取失败: {exc}",
                 )
-        if not ticker_info.is_etf and market_cap is not None and market_cap < MIN_MARKET_CAP:
+        if not ticker_info.is_etf and market_cap is not None and market_cap < MARKET_CONFIGS.get(market, A_SHARE_CONFIG).min_market_cap:
             return ScanResult(
                 ticker=ticker,
                 market=market,
@@ -226,12 +227,15 @@ def scan_single_from_df(
                 sector=ticker_info.sector,
                 industry=ticker_info.industry,
                 is_etf=ticker_info.is_etf,
-                error=f"市值 {market_cap:,.0f} 元低于最低要求 {MIN_MARKET_CAP:,.0f} 元",
+                error=f"市值 {market_cap:,.0f} 低于最低要求 {MARKET_CONFIGS.get(market, A_SHARE_CONFIG).min_market_cap:,.0f}",
             )
 
         close = df["Close"].iloc[-1]
 
         # ---- 2. Indicators ----
+        # Truncate to MAX_INDICATOR_BARS — all indicators use ≤252 bars
+        if len(df) > MAX_INDICATOR_BARS:
+            df = df.iloc[-MAX_INDICATOR_BARS:].copy()
         df = compute_all_indicators(df)
 
         # ---- 3. Filters ----
@@ -239,6 +243,7 @@ def scan_single_from_df(
             df,
             market_cap=market_cap,
             require_market_cap=not ticker_info.is_etf,
+            market=market,
         )
         passed = filter_results.all_passed()
         filter_map = {
@@ -433,12 +438,14 @@ def run_scan(
         # Match download_ticker's cache naming: subdirectory per market
         if ti.market == "us":
             paths_to_try = [
+                CACHE_DIR / "us" / f"{safe}.parquet",
                 CACHE_DIR / "us" / f"{safe}.csv",
                 CACHE_DIR / f"{safe}__us.csv",
                 CACHE_DIR / f"{safe}.csv",
             ]
         else:
             paths_to_try = [
+                CACHE_DIR / "a_share" / f"{safe}.parquet",
                 CACHE_DIR / "a_share" / f"{safe}.csv",
                 CACHE_DIR / f"{safe}__eastmoney.csv",
                 CACHE_DIR / f"{safe}.csv",
